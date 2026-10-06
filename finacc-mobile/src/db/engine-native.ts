@@ -1,0 +1,75 @@
+import * as SQLite from 'expo-sqlite';
+import type { DbEngine } from './types';
+
+/**
+ * محرك expo-sqlite للأجهزة (native) — WAL + foreign_keys مفعّلان دائماً.
+ * لا يُستورد إلا ديناميكياً من client.ts (كشف HermesInternal) حتى لا يُنفَّذ على الويب.
+ * منطق المعاملات منسوخ حرفياً من محرك الويب (BEGIN IMMEDIATE + SAVEPOINT)
+ * — بلا withTransactionAsync — لتطابق السلوك بين المنصتين.
+ */
+
+type BindParams = (string | number | null | boolean | Uint8Array)[];
+
+export async function createNativeEngine(): Promise<DbEngine> {
+  const db = await SQLite.openDatabaseAsync('finacc.db');
+  await db.execAsync('PRAGMA journal_mode = WAL;');
+  await db.execAsync('PRAGMA foreign_keys = ON;');
+
+  const bind = (params?: unknown[]): BindParams => (params ?? []) as BindParams;
+
+  let txDepth = 0;
+
+  const engine: DbEngine = {
+    async run(sql, params) {
+      const result = await db.runAsync(sql, bind(params));
+      return { changes: result.changes, lastInsertRowId: Number(result.lastInsertRowId ?? 0) };
+    },
+
+    async all<T>(sql: string, params?: unknown[]) {
+      return (await db.getAllAsync<T>(sql, bind(params))) as T[];
+    },
+
+    async exec(sql) {
+      await db.execAsync(sql);
+    },
+
+    async transaction<T>(fn: () => Promise<T>): Promise<T> {
+      const depth = txDepth;
+      txDepth += 1;
+      try {
+        if (depth === 0) {
+          await db.execAsync('BEGIN IMMEDIATE');
+        } else {
+          await db.execAsync(`SAVEPOINT sp_${depth}`);
+        }
+        const result = await fn();
+        if (depth === 0) {
+          await db.execAsync('COMMIT');
+        } else {
+          await db.execAsync(`RELEASE sp_${depth}`);
+        }
+        return result;
+      } catch (err) {
+        try {
+          if (depth === 0) {
+            await db.execAsync('ROLLBACK');
+          } else {
+            await db.execAsync(`ROLLBACK TO sp_${depth}`);
+            await db.execAsync(`RELEASE sp_${depth}`);
+          }
+        } catch {
+          // تجاهل فشل التراجع للحفاظ على الخطأ الأصلي
+        }
+        throw err;
+      } finally {
+        txDepth -= 1;
+      }
+    },
+
+    persist(): void {
+      // no-op — القاعدة على القرص (WAL) على الجهاز، لا حاجة لتصدير يدوي
+    },
+  };
+
+  return engine;
+}

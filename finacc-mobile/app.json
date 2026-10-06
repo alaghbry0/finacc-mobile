@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "المحاسب الشخصي",
+    "slug": "finacc-mobile",
+    "version": "1.0.0",
+    "scheme": "finacc",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "backgroundColor": "#0F172A",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "android": {
+      "package": "ye.finacc.personal",
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.VIBRATE",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.WRITE_MEDIA_IMAGES"
+      ]
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "ye.finacc.personal"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-sqlite"
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "السماح بالوصول إلى Face ID لتسجيل الدخول."
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}
