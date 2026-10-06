@@ -229,3 +229,36 @@ Stage Summary:
 - APK التسليم: finacc-v1.0.0-arm64.apk (arm64-v8a — يناسب أي هاتف أندرويد حديث؛ 32-bit القديم جداً يحتاج بناء شاملاً بمعماريات إضافية).
 - **الرابط النهائي للتثبيت**: https://github.com/alaghbry0/finacc-mobile/releases/download/v1.0.0/finacc-v1.0.0-arm64.apk
 - صفحة الإصدار (مع التعليمات): https://github.com/alaghbry0/finacc-mobile/releases/tag/v1.0.0
+
+---
+Task ID: 8 (إصلاح توافق الأجهزة — v1.0.1)
+Agent: المنسق الرئيسي
+Task: المستخدم أفاد بأن التطبيق فيه مشاكل وعيوب كثيرة وغير متوافق مع بيئة جهازه الأندرويد — تشخيص جذري وإصلاح وإصدار APK جديد
+
+Work Log:
+- تشخيص منهجي بمراجعة كل مسارات الكود الخاصة بالمنصة native مقابل web (كانت كل التحققات السابقة على تصدير الويب فقط):
+  1. crypto.subtle + TextEncoder غير موجودين في Hermes → hashPin كان ينهار عند إعداد PIN (الإعداد الأول مستحيل) — المصدر الأرجح لشكوى «غير متوافق».
+  2. btoa/atob غير موجودين في Hermes (المسارات الاحتياطية كانت Buffer وهو أيضاً غير موجود) → تصدير/استيراد النسخ الاحتياطية على الجهاز تنهار (engine-native.ts و backup-native.ts و backup.ts).
+  3. forceRTL من JS يحتاج إعادة تحميل الحزمة → الإقلاع الأول للتطبيق كان LTR كلياً (واجهة معكوسة).
+  4. about.tsx doWipe كان يستخدم indexedDB + window.location.reload على الجهاز (خصائص متصفح) → انهيار.
+  5. ParkedCartsSheet استخدم toLocaleDateString('ar') (Intl غير مضمون على Hermes).
+- الإصلاحات:
+  - src/utils/sha256.ts (جديد): SHA-256 + HMAC + PBKDF2-HMAC-SHA256 خالصة (FIPS 180-4 / RFC 2104 / RFC 8018) مع تحسين حالة ipad/opad المحفوظة (277ms لـ100k تكرار في bun بعد التحسين مقابل 1814ms قبله).
+  - src/services/crypto.ts: مساران — WebCrypto على الويب (كما كان) والخالص على الجهاز — نفس الناتج بتة ببتة (تحقق اختباري مباشر ضد crypto.subtle).
+  - src/utils/base64.ts (جديد): bytesToBase64/base64ToBytes خالصة — استبدلت btoa/atob/Buffer في engine-native.ts و backup.ts و backup-native.ts.
+  - RTL جذري: plugins/force-rtl.js (config plugin يحقن I18nUtil.allowRTL+forceRTL في MainApplication.onCreate قبل قراءة RN) + حقن مباشر في android/ الحالي + بوابة أمان JS في _layout.tsx (forceRTL ثم reloadAppAsync من expo عند !isRTL — تعمل في بناء الإصدار).
+  - about.tsx: مسح native = إغلاق القاعدة → حذف finacc.db وwal/shm → reloadAppAsync تلقائي (الويب كما كان).
+  - backup-native.ts: استعادة → إعادة تشغيل تلقائية بدل مطالبة المستخدم.
+  - ParkedCartsSheet: common.formatDate بدل Intl.
+  - app.json: version 1.0.1 + versionCode 2 + تسجيل plugin. APP_VERSION في about.tsx حُدّث.
+- الاختبارات: src/utils/__tests__/native-compat.test.ts — 16 اختباراً: متجهات NIST/RFC 4648/7914 (sha256 فارغ/abc/عربي/1000 حرف، hmac، pbkdf2 3 متجهات رسمية + اقتطاع) + التقاطع المباشر مع crypto.subtle + دورة base64 كاملة + مطابقة btoa. أثناء التطوير صُحح خللان في التحسين (عدم احتساب البايتات المضغوطة في sha256 + U1 بلا لف HMAC الخارجي) — كلها خضراء الآن.
+- البوابات: tsc صفر ✓ | 311/311 اختباراً ✓ | تصدير الويب ✓ | متصفح (agent-browser): onboarding كامل من الصفر حتى إنشاء PIN 1234 ودخول التطبيق بالتبويبات الأربعة + شاشة حول (الإصدار 1.0.1 + Integrity سليمة) — صفر أخطاء متصفح ✓.
+- إدارة القرص (كان 100% ممتلئ): حذف كاشات bun (1.8G) + JDK17 المكرر من gradle (500M) + intermediates بعد اكتمال البناء (658M) + turbopack cache مؤقتاً؛ خُفض Xmx الـdaemon إلى 1536m (كان يُقتل بضغط الذاكرة).
+- البناء: assembleRelease نجح (4 دفعات، الـdaemon يُقتل بين الطلبات — يُستأنف تدريجياً) → app-release.apk بمعمارية arm64-v8a (41.6MB) يحوي I18nUtil في classes.dex وعلامات الإصلاح كلها في index.android.bundle (reloadAppAsync/force-rtl/wipe-preview-data/restore-backup/pbkdf2Sha256/utf8Bytes — تحقق بايتي).
+- النشر: commit 6063127 + e3e901d دُفعا إلى main. Release v1.0.1 أُنشئ مع ملاحظات عربية مفصلة ووُقّع بأن finacc-v1.0.1-arm64.apk أصل (41,624,764 بايت) — الرابط العام يعمل بلا مصادقة (302→200). صفحة الهبوط: بطاقة APK أصبح فيها زر تحميل مباشر (تحقق VLM بصري).
+
+Stage Summary:
+- رابط APK النهائي للتثبيت: https://github.com/alaghbry0/finacc-mobile/releases/download/v1.0.1/finacc-v1.0.1-arm64.apk
+- صفحة الإصدار: https://github.com/alaghbry0/finacc-mobile/releases/tag/v1.0.1
+- التحديث يُثبَّت فوق 1.0.0 مباشرة (versionCode 2) — البصمات متوافقة بين المنصتين.
+- المتبقي المعروف: بلوتوث ESC/POS يتطلب جهازاً حقيقياً للاختبار، استيراد Excel وتحويل المخازن وFEFO — مؤجل V1.1 كما هو موثق.
