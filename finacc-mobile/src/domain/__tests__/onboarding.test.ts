@@ -9,7 +9,7 @@ import { hashPin } from '@/services/crypto';
  * اختبارات الإعداد الأولي (FR-13-01):
  * كل شيء داخل معاملة واحدة — فشل أي خطوة (بصمة فارغة أو تعارض عملة) يرجع الكل،
  * والاستدعاء الثاني يرفض (قرار موثق)، والنتيجة: عملة + شركة + مخزن + صندوق + مستخدم
- * + 5 فئات مصاريف + 17 إعداداً.
+ * + 5 فئات مصاريف + 20 إعداداً (17 من الملحق هـ + 3 مفاتيح طباعة FR-13-03).
  */
 
 beforeAll(async () => {
@@ -167,8 +167,8 @@ describe('onboarding: النجاح الكامل (FR-13-01)', () => {
     const cats = await db.all<{ name: string }>('SELECT name FROM expense_category');
     expect(cats.map((c) => c.name).sort()).toEqual(['رواتب', 'عام', 'إيجار', 'كهرباء', 'نقل'].sort());
 
-    // الإعدادات الـ17
-    expect(await count('settings')).toBe(17);
+    // الإعدادات الـ20 (17 من الملحق هـ + 3 طباعة FR-13-03)
+    expect(await count('settings')).toBe(20);
     expect(await getSetting('fx.fallback')).toBe('off');
 
     // قيد تدقيق الإقلاع + هوية الجلسة للمدير

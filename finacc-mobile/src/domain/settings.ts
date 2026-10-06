@@ -3,13 +3,17 @@ import { getDb } from '@/db/client';
 import { getCurrentUserId } from './session-user';
 
 /**
- * سجل الإعدادات — الملحق هـ من SRS v1.2 حرفياً (FR-13-09):
+ * سجل الإعدادات — الملحق هـ من SRS v1.2 (FR-13-09):
  * لا يجوز إضافة أي إعداد خارج هذا السجل، ولا استخدام «حسب الإعداد» في أي نص بلا مفتاح منه.
  * التخزين: جدول settings (key TEXT PK, value TEXT) — القراءة تُرجع القيمة أو الافتراضي
  * (لا كتابة أبداً أثناء القراءة)، والكتابة تتحقق بـ zod من نطاق كل مفتاح.
+ *
+ * ملحوظة امتداد موثقة (الموجة 6-b): أضيفت مفاتيح printing.* الثلاثة تحقيقاً لـ FR-13-03
+ * (إعدادات الطباعة: عرض الورق/مختصر-مفصل/نسخ عند الحفظ) مع اشتراط FR-13-09 نفسه أن يكون
+ * لكل سلوك قابل للضبط مفتاح في هذا السجل — جدول الملحق هـ لم يدرجها.
  */
 
-/** القيم الافتراضية النصية لكل مفاتيح الملحق هـ (17 مفتاحاً). */
+/** القيم الافتراضية النصية لكل مفاتيح السجل (17 من الملحق هـ + 3 طباعة FR-13-03). */
 export const SETTING_DEFAULTS = {
   'inventory.min_stock_alert': 'on', // on/off
   'inventory.auto_price_margin': '0', // 0–100 (نطاق V1.1)
@@ -28,13 +32,16 @@ export const SETTING_DEFAULTS = {
   'security.autolock_minutes': '5', // 1–60
   'security.pin_lockout': 'on', // ثابتة النظام (لا تُعدل)
   'dating.max_backdate_days': '30', // 1–365
+  'printing.paper': 'receipt80', // receipt58/receipt80/a4 (FR-13-03)
+  'printing.detailed': 'off', // on/off — القالب المفصّل (FR-10-05)
+  'printing.copies': '1', // 1–3 — نسخ عند الحفظ (FR-13-03)
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
 
 const SETTING_KEYS = Object.keys(SETTING_DEFAULTS) as SettingKey[];
 
-/** عدد المفاتيح — حارس انحدار: 17 حرفياً كما في الملحق هـ. */
+/** عدد المفاتيح — حارس انحدار: 17 من الملحق هـ + 3 مفاتيح طباعة (FR-13-03، موثقة أعلاه). */
 export const SETTINGS_COUNT = SETTING_KEYS.length;
 
 // ---------- مخططات zod لكل مفتاح (نطاق القيم من الملحق هـ) ----------
@@ -68,6 +75,9 @@ const SETTING_SCHEMAS: Record<SettingKey, z.ZodType<string>> = {
   'security.autolock_minutes': intRange(1, 60),
   'security.pin_lockout': z.enum(['on']), // ثابتة النظام: مفعّل دائماً ولا يُعدَّل
   'dating.max_backdate_days': intRange(1, 365),
+  'printing.paper': z.enum(['receipt58', 'receipt80', 'a4']),
+  'printing.detailed': onOff,
+  'printing.copies': intRange(1, 3),
 };
 
 /** قائمة مفاتيح السجل (للاختبارات وللشاشات). */

@@ -1,0 +1,1253 @@
+     1→     1→import { z } from 'zod';
+     2→     2→import { getDb } from '@/db/client';
+     3→     3→import type { DbEngine } from '@/db/types';
+     4→     4→import { dec, money, roundTo, Decimal } from '@/utils/money';
+     5→     5→import { todayISO } from '@/utils/format';
+     6→     6→import { getRateSnapshot } from './currency';
+     7→     7→import { assertPeriodOpen, assertBackdateAllowed } from './fiscal';
+     8→     8→import { logAudit } from './audit';
+     9→     9→import { getCurrentUserId } from './session-user';
+    10→    10→import { nextDocNumber } from './docseq';
+    11→    11→
+    12→    12→/**
+    13→    13→ * النقدية — الصناديق والحركات والسندات والوردية (الوحدة 04 كاملة + قرارات 8/9):
+    14→    14→ *
+    15→    15→ * ── اصطلاح الإلغاء (متطابق حرفياً مع voidInvoice في invoicing.ts) ─────────────
+    16→    16→ *   إلغاء حركة = الأصل is_voided=1 + حركة معاكسة reversal_of=<معرّف الأصل>.
+    17→    17→ *   الزوج معاً يُستبعد من كل الأرصدة والوردية (is_voided=1 أو reversal_of NOT NULL)
+    18→    18→ *   ويبقى في السجل للتدقيق — «أثرها زال من الرصيد» دون حذف فيزيائي (FR-04-08).
+    19→    19→ *
+    20→    20→ * ── دفتر الصندوق بعملته حصراً (قرار 8) ─────────────────────────────────────
+    21→    21→ *   لكل صندوق عملة واحدة، ورصيده يُحسب بعملته: لا تدخل دفترَه إلا الحركات
+    22→    22→ *   المسجَّلة بعملته. لهذا يُسجَّل التحويل بين صندوقين بعملتين مختلفتين
+    23→    23→ *   بساقين تحملان نفس (cashbox_id=المصدر, to_cashbox_id=الوجهة) تختلفان في
+    24→    24→ *   العملة والمبلغ: ساق صادرة بعملة المصدر ومبلغه، وساق واردة بعملة الوجهة
+    25→    25→ *   ومبلغها المحوّل بسعر لحظة التحويل + settlement_rate + fx_gain_loss (FR-04-07).
+    26→    26→ *   التحويل بعملة واحدة = ساق واحدة تكفي الطرفين.
+    27→    27→ *
+    28→    28→ * ── «opening» وارد ─────────────────────────────────────────────────────────
+    29→    29→ *   قائمة الاتجاه في المهمة ذكرت الأنواع الجارية ونست «opening» — الرصيد
+    30→    30→ *   الافتتاحي وارد بطبيعته (أموال موجودة في الصندوق) فأُدرج مع الوارد.
+    31→    31→ *
+    32→    32→ * ── قرار 9: السالب مسموح ────────────────────────────────────────────────────
+    33→    33→ *   لا فحص سالب إطلاقاً في أي مسار نقدي؛ createCashTx يعيد newBalance ليحذّر
+    34→    34→ *   الـ UI (شارة «سالب» + تأكيد قبل الحفظ). المنع يبقى للمخزون فقط.
+    35→    35→ *
+    36→    36→ * ── تخصيص FIFO للقبض الحر (قاعدة 5.4-6) ────────────────────────────────────
+    37→    37→ *   المتبقي على فاتورة = due_amount − Σ(تخصيصات سنداتها التي تحمل الطرف) —
+    38→    38→ *   سند القبض لحظة البيع النقدي لا يحمل customer_id (قرار invoicing الموثق)،
+    39→    39→ *   فجزؤه النقدي محسوب أصلاً داخل due_amount ولا يُخصم مرتين.
+    40→    40→ *
+    41→    41→ * ── امتدادات موثقة على عقد المهمة (مجموعات عليا لا كسر) ────────────────────
+    42→    42→ *   1) createCashTx يعيد newBalance إضافياً (لتحذير السالب في الواجهة).
+    43→    43→ *   2) CashTxInput يقبل managerConfirmedBackdate (لا بد منه لقاعدة 5.4-11)
+    44→    44→ *      و toAmount للتحويل بين عملتين (المبلغ المستلم فعلاً بعملة الوجهة —
+    45→    45→ *      عند غيابه يُحسب نظرياً بسعر اليوم ويكون فرق الصرف صفراً؛ عند وجوده
+    46→    46→ *      يظهر الفرق الحقيقي في fx_gain_loss).
+    47→    47→ *   3) دوال عرض إضافية للشاشات: listCashboxOptions / customerOpenInvoices /
+    48→    48→ *      lastShift.
+    49→    49→ *   4) فرق الوردية = العد الفعلي − (الرصيد الافتتاحي + الوارد − الصادر):
+    50→    50→ *      المستخدم يعدّ الدرج كاملاً، فلا يظهر له «زيادة» وهمية بقيمة العُدّة.
+    51→    51→ */
+    52→    52→
+    53→    53→// ============ الأنواع والعقود ============
+    54→    54→
+    55→    55→export type CashTxType =
+    56→    56→  | 'receipt'
+    57→    57→  | 'payment'
+    58→    58→  | 'expense'
+    59→    59→  | 'owner_draw'
+    60→    60→  | 'capital_in'
+    61→    61→  | 'box_transfer'
+    62→    62→  | 'bank_deposit'
+    63→    63→  | 'bank_withdraw'
+    64→    64→  | 'opening';
+    65→    65→
+    66→    66→export interface CashTxInput {
+    67→    67→  txType: CashTxType;
+    68→    68→  cashboxId: number;
+    69→    69→  /** صندوق الوجهة — إلزامي لـ box_transfer. */
+    70→    70→  toCashboxId?: number | null;
+    71→    71→  /** عملة الحركة = عملة الصندوق حصراً (يُتحقق منها). */
+    72→    72→  currencyId: number;
+    73→    73→  /** > 0 — الاتجاه من tx_type. */
+    74→    74→  amount: string;
+    75→    75→  /** للتحويل بين عملتين: المبلغ المستلم فعلاً بعملة الوجهة (اختياري — انظر الرأس). */
+    76→    76→  toAmount?: string;
+    77→    77→  /** افتراضي اليوم (YYYY-MM-DD). */
+    78→    78→  txDate?: string;
+    79→    79→  refType?: 'invoice' | 'installment' | 'on_account' | 'stocktake' | 'transfer' | null;
+    80→    80→  refId?: number | null;
+    81→    81→  /** إلزامي لـ expense. */
+    82→    82→  expenseCategoryId?: number | null;
+    83→    83→  customerId?: number | null;
+    84→    84→  supplierId?: number | null;
+    85→    85→  description?: string;
+    86→    86→  /** تجاوز تحذير التأريخ الرجعي > 30 يوماً (قاعدة 5.4-11). */
+    87→    87→  managerConfirmedBackdate?: boolean;
+    88→    88→}
+    89→    89→
+    90→    90→export interface CashTxResult {
+    91→    91→  id: number;
+    92→    92→  /** دائماً null وقت الإنشاء — الرقم يُستهلك عند أول طباعة (FR-04-10). */
+    93→    93→  voucherNo: string | null;
+    94→    94→  /** رصيد الصندوق بعد الحركة بعملته — لتحذير السالب في الواجهة (قرار 9). */
+    95→    95→  newBalance: string;
+    96→    96→}
+    97→    97→
+    98→    98→export interface CashTxRow {
+    99→    99→  id: number;
+   100→   100→  txType: string;
+   101→   101→  txDate: string;
+   102→   102→  amount: string;
+   103→   103→  currencyId: number;
+   104→   104→  currencyCode: string;
+   105→   105→  currencyDecimals: number;
+   106→   106→  cashboxId: number;
+   107→   107→  cashboxName: string | null;
+   108→   108→  toCashboxId: number | null;
+   109→   109→  toCashboxName: string | null;
+   110→   110→  customerId: number | null;
+   111→   111→  customerName: string | null;
+   112→   112→  supplierId: number | null;
+   113→   113→  supplierName: string | null;
+   114→   114→  expenseCategoryId: number | null;
+   115→   115→  expenseCategoryName: string | null;
+   116→   116→  refType: string | null;
+   117→   117→  refId: number | null;
+   118→   118→  description: string | null;
+   119→   119→  voucherNo: string | null;
+   120→   120→  exchangeRate: string;
+   121→   121→  settlementRate: string | null;
+   122→   122→  fxGainLoss: string;
+   123→   123→  isVoided: boolean;
+   124→   124→  isReversal: boolean;
+   125→   125→  /** فرق صرف ≠ 0 → شارة fx في القائمة. */
+   126→   126→  hasFx: boolean;
+   127→   127→  direction: 'in' | 'out' | 'transfer';
+   128→   128→}
+   129→   129→
+   130→   130→export interface CashboxBalanceRow {
+   131→   131→  id: number;
+   132→   132→  name: string;
+   133→   133→  currencyId: number;
+   134→   134→  currencyCode: string;
+   135→   135→  currencyDecimals: number;
+   136→   136→  isDefault: boolean;
+   137→   137→  /** الرصيد الحالي بعملة الصندوق — قد يكون سالباً (قرار 9). */
+   138→   138→  balance: string;
+   139→   139→}
+   140→   140→
+   141→   141→export interface CashboxOptionRow {
+   142→   142→  id: number;
+   143→   143→  name: string;
+   144→   144→  currencyId: number;
+   145→   145→  currencyCode: string;
+   146→   146→  currencyDecimals: number;
+   147→   147→  isDefault: boolean;
+   148→   148→}
+   149→   149→
+   150→   150→export interface ShiftSummary {
+   151→   151→  cashboxId: number;
+   152→   152→  openedAt: string;
+   153→   153→  expectedIn: string;
+   154→   154→  expectedOut: string;
+   155→   155→  expected: string;
+   156→   156→}
+   157→   157→
+   158→   158→export interface ShiftRow {
+   159→   159→  id: number;
+   160→   160→  cashboxId: number;
+   161→   161→  userId: number | null;
+   162→   162→  openedAt: string;
+   163→   163→  closedAt: string | null;
+   164→   164→  openingCount: string | null;
+   165→   165→  expected: string | null;
+   166→   166→  counted: string | null;
+   167→   167→  difference: string | null;
+   168→   168→  notes: string | null;
+   169→   169→}
+   170→   170→
+   171→   171→export interface ExpenseCategoryRow {
+   172→   172→  id: number;
+   173→   173→  name: string;
+   174→   174→}
+   175→   175→
+   176→   176→/** شكل صف cash_tx كما يُقرأ في الإلغاء (أعمدة الساق). */
+   177→   177→interface CashTxLegRow {
+   178→   178→  id: number;
+   179→   179→  tx_type: string;
+   180→   180→  cashbox_id: number;
+   181→   181→  to_cashbox_id: number | null;
+   182→   182→  currency_id: number;
+   183→   183→  amount: string | number;
+   184→   184→  exchange_rate: string | number;
+   185→   185→  tx_date: string;
+   186→   186→  ref_type: string | null;
+   187→   187→  ref_id: number | null;
+   188→   188→  expense_category_id: number | null;
+   189→   189→  customer_id: number | null;
+   190→   190→  supplier_id: number | null;
+   191→   191→  is_voided: number;
+   192→   192→  reversal_of: number | null;
+   193→   193→}
+   194→   194→
+   195→   195→export interface OpenInvoiceRow {
+   196→   196→  id: number;
+   197→   197→  invoiceNo: string | null;
+   198→   198→  issuedAt: string;
+   199→   199→  total: string;
+   200→   200→  /** المتبقي الفعلي بعد خصم التحصيلات (FIFO-aware). */
+   201→   201→  due: string;
+   202→   202→}
+   203→   203→
+   204→   204→// ============ التحقق (zod) ============
+   205→   205→
+   206→   206→const POS_MONEY_RE = /^\d+(\.\d+)?$/;
+   207→   207→const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+   208→   208→
+   209→   209→const TX_TYPES: [CashTxType, ...CashTxType[]] = [
+   210→   210→  'receipt',
+   211→   211→  'payment',
+   212→   212→  'expense',
+   213→   213→  'owner_draw',
+   214→   214→  'capital_in',
+   215→   215→  'box_transfer',
+   216→   216→  'bank_deposit',
+   217→   217→  'bank_withdraw',
+   218→   218→  'opening',
+   219→   219→];
+   220→   220→
+   221→   221→const CashTxSchema = z.object({
+   222→   222→  txType: z.enum(TX_TYPES),
+   223→   223→  cashboxId: z.number().int().positive('رقم الصندوق غير صالح'),
+   224→   224→  toCashboxId: z.number().int().positive('رقم صندوق الوجهة غير صالح').nullable().optional(),
+   225→   225→  currencyId: z.number().int().positive('رقم العملة غير صالح'),
+   226→   226→  amount: z
+   227→   227→    .string()
+   228→   228→    .regex(POS_MONEY_RE, 'المبلغ يجب أن يكون رقماً أكبر من صفر مثل «1500» أو «1500.50»')
+   229→   229→    .refine((s) => dec(s).greaterThan(0), { message: 'المبلغ يجب أن يكون أكبر من صفر' }),
+   230→   230→  toAmount: z
+   231→   231→    .string()
+   232→   232→    .regex(POS_MONEY_RE, 'المبلغ المستلم بعملة الوجهة يجب أن يكون رقماً أكبر من صفر')
+   233→   233→    .optional(),
+   234→   234→  txDate: z.string().regex(ISO_DATE_RE, 'تاريخ الحركة يجب أن يكون بصيغة YYYY-MM-DD').optional(),
+   235→   235→  refType: z.enum(['invoice', 'installment', 'on_account', 'stocktake', 'transfer']).nullable().optional(),
+   236→   236→  refId: z.number().int().positive('رقم المرجع غير صالح').nullable().optional(),
+   237→   237→  expenseCategoryId: z.number().int().positive('رقم فئة المصروف غير صالح').nullable().optional(),
+   238→   238→  customerId: z.number().int().positive('رقم العميل غير صالح').nullable().optional(),
+   239→   239→  supplierId: z.number().int().positive('رقم المورّد غير صالح').nullable().optional(),
+   240→   240→  description: z.string().trim().max(500, 'الوصف طويل (الحد 500 حرف)').optional(),
+   241→   241→  managerConfirmedBackdate: z.boolean().optional(),
+   242→   242→});
+   243→   243→
+   244→   244→type CashTxParsed = z.output<typeof CashTxSchema>;
+   245→   245→
+   246→   246→function parseOrThrow(input: CashTxInput): CashTxParsed {
+   247→   247→  const parsed = CashTxSchema.safeParse(input);
+   248→   248→  if (!parsed.success) {
+   249→   249→    const issue = parsed.error!.issues[0];
+   250→   250→    throw new Error(
+   251→   251→      `مدخلات حركة النقدية غير مكتملة: ${issue?.message ?? 'راجع الحقول'} (الحقل: ${issue?.path?.join('.') ?? '?'})`,
+   252→   252→    );
+   253→   253→  }
+   254→   254→  return parsed.data;
+   255→   255→}
+   256→   256→
+   257→   257→// ============ التسلسل (نفس قرار invoicing: محرك sql.js والمعاملات المتوازية) ============
+   258→   258→
+   259→   259→let writeChain: Promise<unknown> = Promise.resolve();
+   260→   260→
+   261→   261→function runSerialized<T>(fn: () => Promise<T>): Promise<T> {
+   262→   262→  const next = writeChain.then(fn, fn);
+   263→   263→  writeChain = next.catch(() => undefined);
+   264→   264→  return next;
+   265→   265→}
+   266→   266→
+   267→   267→// ============ الاتجاهات ============
+   268→   268→
+   269→   269→const IN_TYPES = new Set(['receipt', 'capital_in', 'bank_deposit', 'opening']);
+   270→   270→const OUT_TYPES = new Set(['payment', 'expense', 'owner_draw', 'bank_withdraw']);
+   271→   271→/** أنواع مرجع مرتبطة بدورة حياة مستند آخر — إلغاؤها يتم من مستندها لا من هنا. */
+   272→   272→const DOCUMENT_BOUND_REFS = new Set(['invoice', 'sale_return', 'purchase_return']);
+   273→   273→
+   274→   274→/** سلب حركة → نوعها المعاكس (سجل معاكس فقط — مستبعد من كل الأرصدة، فالدلالة للقارئ). */
+   275→   275→const REVERSAL_TYPE: Record<string, string> = {
+   276→   276→  receipt: 'payment',
+   277→   277→  payment: 'receipt',
+   278→   278→  expense: 'receipt',
+   279→   279→  owner_draw: 'capital_in',
+   280→   280→  capital_in: 'owner_draw',
+   281→   281→  bank_deposit: 'bank_withdraw',
+   282→   282→  bank_withdraw: 'bank_deposit',
+   283→   283→  opening: 'payment',
+   284→   284→  box_transfer: 'box_transfer',
+   285→   285→};
+   286→   286→
+   287→   287→// ============ جمع دفتر صندوق (بعملته) ============
+   288→   288→
+   289→   289→/**
+   290→   290→ * Σ الوارد والصادر لصندوق بعملته خلال نافذة اختيارية — كل الجمع Decimal في JS
+   291→   291→ * (SUM في SQLite يُرجع REAL وقد يفقد الدقة). المستبعد دائماً: is_voided=1
+   292→   292→ * أو reversal_of NOT NULL (اصطلاح الإلغاء أعلاه).
+   293→   293→ */
+   294→   294→async function sumBoxFlows(
+   295→   295→  db: DbEngine,
+   296→   296→  cashboxId: number,
+   297→   297→  filter: { dateFrom?: string; dateTo?: string } = {},
+   298→   298→): Promise<{ in: Decimal; out: Decimal }> {
+   299→   299→  const boxRows = await db.all<{ currency_id: number }>('SELECT currency_id FROM cashbox WHERE id = ?', [cashboxId]);
+   300→   300→  if (boxRows.length === 0) {
+   301→   301→    throw new Error(`صندوق غير موجود (رقم ${cashboxId}) — لا يمكن حساب رصيده`);
+   302→   302→  }
+   303→   303→  const currencyId = Number(boxRows[0].currency_id);
+   304→   304→
+   305→   305→  const where: string[] = [
+   306→   306→    't.is_voided = 0',
+   307→   307→    't.reversal_of IS NULL',
+   308→   308→    't.currency_id = ?',
+   309→   309→    '(t.cashbox_id = ? OR (t.tx_type = \'box_transfer\' AND t.to_cashbox_id = ?))',
+   310→   310→  ];
+   311→   311→  const params: unknown[] = [currencyId, cashboxId, cashboxId];
+   312→   312→  if (filter.dateFrom !== undefined) {
+   313→   313→    where.push('t.tx_date >= ?');
+   314→   314→    params.push(filter.dateFrom);
+   315→   315→  }
+   316→   316→  if (filter.dateTo !== undefined) {
+   317→   317→    where.push('t.tx_date <= ?');
+   318→   318→    params.push(filter.dateTo);
+   319→   319→  }
+   320→   320→
+   321→   321→  const rows = await db.all<{ tx_type: string; cashbox_id: number; amount: string | number }>(
+   322→   322→    `SELECT t.tx_type, t.cashbox_id, t.amount FROM cash_tx t WHERE ${where.join(' AND ')}`,
+   323→   323→    params,
+   324→   324→  );
+   325→   325→
+   326→   326→  let inSum = dec(0);
+   327→   327→  let outSum = dec(0);
+   328→   328→  for (const r of rows) {
+   329→   329→    const amount = dec(r.amount);
+   330→   330→    if (r.tx_type === 'box_transfer') {
+   331→   331→      // ساق صادرة (cashbox_id=هذا) أو واردة (to_cashbox_id=هذا) — بعملة هذا الصندوق حصراً
+   332→   332→      if (Number(r.cashbox_id) === cashboxId) outSum = outSum.plus(amount);
+   333→   333→      else inSum = inSum.plus(amount);
+   334→   334→    } else if (IN_TYPES.has(r.tx_type)) {
+   335→   335→      inSum = inSum.plus(amount);
+   336→   336→    } else if (OUT_TYPES.has(r.tx_type)) {
+   337→   337→      outSum = outSum.plus(amount);
+   338→   338→    }
+   339→   339→  }
+   340→   340→  return { in: inSum, out: outSum };
+   341→   341→}
+   342→   342→
+   343→   343→// ============ رصيد الصناديق (FR-04-06/09) ============
+   344→   344→
+   345→   345→/** أرصدة كل الصناديق الفاعلة بعملاتها — السالب مسموح ويعود كما هو (قرار 9). */
+   346→   346→export async function cashboxBalances(): Promise<CashboxBalanceRow[]> {
+   347→   347→  const db = await getDb();
+   348→   348→  const boxes = await db.all<{
+   349→   349→    id: number; name: string; currency_id: number; is_default: number; code: string; decimals: number;
+   350→   350→  }>(
+   351→   351→    'SELECT cb.id, cb.name, cb.currency_id, cb.is_default, c.code, c.decimals ' +
+   352→   352→      'FROM cashbox cb JOIN currency c ON c.id = cb.currency_id WHERE cb.is_archived = 0 ' +
+   353→   353→      'ORDER BY cb.is_default DESC, cb.name COLLATE NOCASE ASC',
+   354→   354→  );
+   355→   355→  const out: CashboxBalanceRow[] = [];
+   356→   356→  for (const b of boxes) {
+   357→   357→    const flows = await sumBoxFlows(db, Number(b.id), {});
+   358→   358→    out.push({
+   359→   359→      id: Number(b.id),
+   360→   360→      name: b.name,
+   361→   361→      currencyId: Number(b.currency_id),
+   362→   362→      currencyCode: b.code,
+   363→   363→      currencyDecimals: Number(b.decimals),
+   364→   364→      isDefault: Number(b.is_default) === 1,
+   365→   365→      balance: money(flows.in.minus(flows.out)),
+   366→   366→    });
+   367→   367→  }
+   368→   368→  return out;
+   369→   369→}
+   370→   370→
+   371→   371→/** رصيد صندوق واحد بعملته (السالب مسموح — قرار 9). */
+   372→   372→export async function cashboxBalance(cashboxId: number): Promise<string> {
+   373→   373→  const db = await getDb();
+   374→   374→  const flows = await sumBoxFlows(db, cashboxId, {});
+   375→   375→  return money(flows.in.minus(flows.out));
+   376→   376→}
+   377→   377→
+   378→   378→/** الصناديق الفاعلة بعملاتها — لاختيار الصندوق في النماذج. */
+   379→   379→export async function listCashboxOptions(): Promise<CashboxOptionRow[]> {
+   380→   380→  const db = await getDb();
+   381→   381→  const rows = await db.all<{ id: number; name: string; currency_id: number; is_default: number; code: string; decimals: number }>(
+   382→   382→    'SELECT cb.id, cb.name, cb.currency_id, cb.is_default, c.code, c.decimals ' +
+   383→   383→      'FROM cashbox cb JOIN currency c ON c.id = cb.currency_id WHERE cb.is_archived = 0 ' +
+   384→   384→      'ORDER BY cb.is_default DESC, cb.id ASC',
+   385→   385→  );
+   386→   386→  return rows.map((r) => ({
+   387→   387→    id: Number(r.id),
+   388→   388→    name: r.name,
+   389→   389→    currencyId: Number(r.currency_id),
+   390→   390→    currencyCode: r.code,
+   391→   391→    currencyDecimals: Number(r.decimals),
+   392→   392→    isDefault: Number(r.is_default) === 1,
+   393→   393→  }));
+   394→   394→}
+   395→   395→
+   396→   396→// ============ المتبقي على فاتورة + FIFO (قاعدة 5.4-6) ============
+   397→   397→
+   398→   398→/**
+   399→   399→ * المتبقي على فاتورة = due_amount − Σ تخصيصات سنداتها التي تحمل الطرف
+   400→   400→ * (customer_id لفواتير البيع / supplier_id لفواتير الشراء) وغير الملغاة.
+   401→   401→ * سند لحظة البيع النقدي لا يحمل الطرف (قرار invoicing) فلا يُخصم مرتين.
+   402→   402→ */
+   403→   403→async function invoiceRemainingDue(
+   404→   404→  db: DbEngine,
+   405→   405→  invoiceId: number,
+   406→   406→  partyCol: 'customer_id' | 'supplier_id',
+   407→   407→): Promise<Decimal> {
+   408→   408→  const inv = (await db.all<{ due_amount: string | number }>('SELECT due_amount FROM invoice WHERE id = ?', [invoiceId]))[0];
+   409→   409→  if (inv === undefined) {
+   410→   410→    throw new Error(`فاتورة غير موجودة (رقم ${invoiceId}) — ربما حُذف الرابط، أعد اختيار الفاتورة`);
+   411→   411→  }
+   412→   412→  const allocs = await db.all<{ a: string | number }>(
+   413→   413→    `SELECT pa.allocated_amount AS a FROM payment_allocation pa JOIN cash_tx t ON t.id = pa.cash_tx_id ` +
+   414→   414→      `WHERE pa.invoice_id = ? AND t.${partyCol} IS NOT NULL AND t.is_voided = 0`,
+   415→   415→    [invoiceId],
+   416→   416→  );
+   417→   417→  let allocated = dec(0);
+   418→   418→  for (const r of allocs) allocated = allocated.plus(dec(r.a));
+   419→   419→  return dec(inv.due_amount).minus(allocated);
+   420→   420→}
+   421→   421→
+   422→   422→/**
+   423→   423→ * تخصيص مبلغ قبض على الحساب FIFO: أقدم فواتير البيع المكتملة الآجلة ذات متبقٍ
+   424→   424→ * للعميل ← payment_allocation حتى نفاد المبلغ. البقايا تبقى غير مخصصة = رصيد دائن.
+   425→   425→ */
+   426→   426→async function allocateReceiptFifo(
+   427→   427→  db: DbEngine,
+   428→   428→  cashTxId: number,
+   429→   429→  customerId: number,
+   430→   430→  amount: Decimal,
+   431→   431→  now: string,
+   432→   432→): Promise<void> {
+   433→   433→  const existing = await db.all<{ a: string | number }>(
+   434→   434→    'SELECT allocated_amount AS a FROM payment_allocation WHERE cash_tx_id = ?',
+   435→   435→    [cashTxId],
+   436→   436→  );
+   437→   437→  let left = dec(amount);
+   438→   438→  for (const r of existing) left = left.minus(dec(r.a));
+   439→   439→  if (left.lessThanOrEqualTo(0)) return;
+   440→   440→
+   441→   441→  const invoices = await db.all<{ id: number; due_amount: string | number }>(
+   442→   442→    "SELECT id, due_amount FROM invoice WHERE customer_id = ? AND doc_type = 'sale' AND status = 'completed' " +
+   443→   443→      "AND pay_status IN ('credit','mixed') AND due_amount > 0 ORDER BY issued_at ASC, id ASC",
+   444→   444→    [customerId],
+   445→   445→  );
+   446→   446→
+   447→   447→  for (const inv of invoices) {
+   448→   448→    if (left.lessThanOrEqualTo(0)) break;
+   449→   449→    const remaining = (await invoiceRemainingDue(db, Number(inv.id), 'customer_id')).toDecimalPlaces(4);
+   450→   450→    if (remaining.lessThanOrEqualTo(0)) continue;
+   451→   451→    const alloc = Decimal.min(remaining, left.toDecimalPlaces(4));
+   452→   452→    await db.run(
+   453→   453→      'INSERT INTO payment_allocation(cash_tx_id, invoice_id, allocated_amount, allocated_at, created_by) VALUES(?, ?, ?, ?, ?)',
+   454→   454→      [cashTxId, Number(inv.id), money(alloc), now, getCurrentUserId() ?? null],
+   455→   455→    );
+   456→   456→    left = left.minus(alloc);
+   457→   457→  }
+   458→   458→}
+   459→   459→
+   460→   460→/** تخصيص سند قبض حر (on_account) على الأقدم — يُستدعى من الواجهة عند إعادة التخصيص. */
+   461→   461→export async function allocateOnAccountReceipt(cashTxId: number): Promise<void> {
+   462→   462→  const db = await getDb();
+   463→   463→  await runSerialized(() =>
+   464→   464→    db.transaction(async () => {
+   465→   465→      const rows = await db.all<{
+   466→   466→        id: number; tx_type: string; customer_id: number | null; ref_type: string | null; amount: string | number; is_voided: number;
+   467→   467→      }>('SELECT id, tx_type, customer_id, ref_type, amount, is_voided FROM cash_tx WHERE id = ?', [cashTxId]);
+   468→   468→      const t = rows[0];
+   469→   469→      if (t === undefined) {
+   470→   470→        throw new Error(`حركة نقدية غير موجودة (رقم ${cashTxId}) — لا يمكن تخصيصها`);
+   471→   471→      }
+   472→   472→      if (Number(t.is_voided) === 1) {
+   473→   473→        throw new Error('هذه الحركة ملغاة — لا يمكن تخصيص قبض ملغى، أنشئ قبضاً جديداً');
+   474→   474→      }
+   475→   475→      if (t.tx_type !== 'receipt' || t.customer_id === null || t.ref_type !== 'on_account') {
+   476→   476→        throw new Error('التخصيص FIFO متاح لسندات القبض الحرّة (على الحساب) المرتبطة بعميل فقط');
+   477→   477→      }
+   478→   478→      await allocateReceiptFifo(db, cashTxId, Number(t.customer_id), dec(t.amount), new Date().toISOString());
+   479→   479→    }),
+   480→   480→  );
+   481→   481→}
+   482→   482→
+   483→   483→/** فواتير العميل الآجلة المفتوحة (لخيار «على فاتورة محددة») بالمتبقي الفعلي. */
+   484→   484→export async function customerOpenInvoices(customerId: number): Promise<OpenInvoiceRow[]> {
+   485→   485→  const db = await getDb();
+   486→   486→  const rows = await db.all<{ id: number; invoice_no: string | null; issued_at: string; due_amount: string | number; total: string | number }>(
+   487→   487→    "SELECT id, invoice_no, issued_at, due_amount, total FROM invoice WHERE customer_id = ? AND doc_type = 'sale' " +
+   488→   488→      "AND status = 'completed' AND pay_status IN ('credit','mixed') AND due_amount > 0 ORDER BY issued_at ASC, id ASC",
+   489→   489→    [customerId],
+   490→   490→  );
+   491→   491→  const out: OpenInvoiceRow[] = [];
+   492→   492→  for (const r of rows) {
+   493→   493→    const due = (await invoiceRemainingDue(db, Number(r.id), 'customer_id')).toDecimalPlaces(4);
+   494→   494→    if (due.greaterThan(0)) {
+   495→   495→      out.push({
+   496→   496→        id: Number(r.id),
+   497→   497→        invoiceNo: r.invoice_no,
+   498→   498→        issuedAt: r.issued_at,
+   499→   499→        total: money(r.total),
+   500→   500→        due: money(due),
+   501→   501→      });
+   502→   502→    }
+   503→   503→  }
+   504→   504→  return out;
+   505→   505→}
+   506→   506→
+   507→   507→// ============ إنشاء حركة (كل الكتابة داخل transaction واحدة) ============
+   508→   508→
+   509→   509→export async function createCashTx(input: CashTxInput): Promise<CashTxResult> {
+   510→   510→  const v = parseOrThrow(input);
+   511→   511→  return runSerialized(() => persistCashTx(v));
+   512→   512→}
+   513→   513→
+   514→   514→async function persistCashTx(v: CashTxParsed): Promise<CashTxResult> {
+   515→   515→  const db = await getDb();
+   516→   516→  return db.transaction(async () => {
+   517→   517→    const now = new Date().toISOString();
+   518→   518→    const txDate = v.txDate ?? todayISO();
+   519→   519→
+   520→   520→    // 1) الصندوق وعملته (+ الوجهة للتحويل)
+   521→   521→    const boxRows = await db.all<{ id: number; name: string; currency_id: number; is_archived: number }>(
+   522→   522→      'SELECT id, name, currency_id, is_archived FROM cashbox WHERE id = ?',
+   523→   523→      [v.cashboxId],
+   524→   524→    );
+   525→   525→    const box = boxRows[0];
+   526→   526→    if (box === undefined) {
+   527→   527→      throw new Error(`صندوق غير موجود (رقم ${v.cashboxId}) — أعد اختيار الصندوق`);
+   528→   528→    }
+   529→   529→    if (Number(box.is_archived) === 1) {
+   530→   530→      throw new Error(`الصندوق «${box.name}» مؤرشف — اختر صندوقاً فاعلاً`);
+   531→   531→    }
+   532→   532→    if (Number(box.currency_id) !== v.currencyId) {
+   533→   533→      throw new Error(`عملة الحركة يجب أن تطابق عملة الصندوق «${box.name}» — الحركات تُسجَّل بعملة الصندوق حصراً`);
+   534→   534→    }
+   535→   535→
+   536→   536→    let destBox: { id: number; name: string; currency_id: number; is_archived: number; decimals: number } | null = null;
+   537→   537→    if (v.txType === 'box_transfer') {
+   538→   538→      if (v.toCashboxId === null || v.toCashboxId === undefined) {
+   539→   539→        throw new Error('تحويل الصندوق يتطلب صندوق وجهة — اختر الصندوق الوجهة أولاً');
+   540→   540→      }
+   541→   541→      if (v.toCashboxId === v.cashboxId) {
+   542→   542→        throw new Error('لا يمكن التحويل من الصندوق إلى نفسه — اختر صندوق وجهة مختلفاً');
+   543→   543→      }
+   544→   544→      const destRows = await db.all<{ id: number; name: string; currency_id: number; is_archived: number; decimals: number }>(
+   545→   545→        'SELECT cb.id, cb.name, cb.currency_id, cb.is_archived, c.decimals FROM cashbox cb ' +
+   546→   546→          'JOIN currency c ON c.id = cb.currency_id WHERE cb.id = ?',
+   547→   547→        [v.toCashboxId],
+   548→   548→      );
+   549→   549→      destBox = destRows[0] ?? null;
+   550→   550→      if (destBox === null) {
+   551→   551→        throw new Error(`صندوق الوجهة غير موجود (رقم ${v.toCashboxId}) — أعد اختيار الصندوق الوجهة`);
+   552→   552→      }
+   553→   553→      if (Number(destBox.is_archived) === 1) {
+   554→   554→        throw new Error(`صندوق الوجهة «${destBox.name}» مؤرشف — اختر صندوقاً فاعلاً`);
+   555→   555→      }
+   556→   556→    }
+   557→   557→
+   558→   558→    // 2) الفترات والتأريخ (قاعدة 5.4-11)
+   559→   559→    await assertPeriodOpen(txDate);
+   560→   560→    await assertBackdateAllowed(txDate, { managerConfirmed: v.managerConfirmedBackdate === true });
+   561→   561→
+   562→   562→    // 3) سعر الصرف لحظة الحركة (قرار 3: MissingRateError تمر كما هي قبل أي كتابة)
+   563→   563→    const rateSrc = await getRateSnapshot(v.currencyId, txDate);
+   564→   564→    const amount = dec(v.amount);
+   565→   565→
+   566→   566→    // 4) قواعد الأطراف والمراجع حسب النوع
+   567→   567→    let customerId = v.customerId ?? null;
+   568→   568→    let supplierId = v.supplierId ?? null;
+   569→   569→    let refType: string | null = v.refType ?? null;
+   570→   570→    let refId = v.refId ?? null;
+   571→   571→    const expenseCategoryId = v.expenseCategoryId ?? null;
+   572→   572→    const description = v.description?.trim() || null;
+   573→   573→
+   574→   574→    if (v.txType === 'expense') {
+   575→   575→      if (expenseCategoryId === null) {
+   576→   576→        throw new Error('المصروف يتطلب فئة مصروف — اختر الفئة من القائمة أو أنشئ فئة جديدة');
+   577→   577→      }
+   578→   578→      const catRows = await db.all<{ id: number; name: string; is_archived: number }>(
+   579→   579→        'SELECT id, name, is_archived FROM expense_category WHERE id = ?',
+   580→   580→        [expenseCategoryId],
+   581→   581→      );
+   582→   582→      const cat = catRows[0];
+   583→   583→      if (cat === undefined) {
+   584→   584→        throw new Error(`فئة مصروف غير موجودة (رقم ${expenseCategoryId}) — أعد اختيار الفئة`);
+   585→   585→      }
+   586→   586→      if (Number(cat.is_archived) === 1) {
+   587→   587→        throw new Error(`فئة المصروف «${cat.name}» مؤرشفة — اختر فئة فاعلة`);
+   588→   588→      }
+   589→   589→    } else if (expenseCategoryId !== null) {
+   590→   590→      throw new Error('فئة المصروف تُستخدم مع المصروفات فقط — أزل الفئة أو غيّر نوع الحركة إلى «مصروف»');
+   591→   591→    }
+   592→   592→
+   593→   593→    if (v.txType === 'receipt') {
+   594→   594→      if (supplierId !== null) {
+   595→   595→        throw new Error('سند القبض يخص تحصيلاً من عميل — أزل المورّد أو استخدم «صرف دفع لمورّد»');
+   596→   596→      }
+   597→   597→      if (customerId !== null) {
+   598→   598→        const custRows = await db.all<{ id: number; name: string; is_archived: number }>(
+   599→   599→          'SELECT id, name, is_archived FROM customer WHERE id = ?',
+   600→   600→          [customerId],
+   601→   601→        );
+   602→   602→        const cust = custRows[0];
+   603→   603→        if (cust === undefined) {
+   604→   604→          throw new Error(`عميل غير موجود (رقم ${customerId}) — أعد اختيار العميل`);
+   605→   605→        }
+   606→   606→        if (Number(cust.is_archived) === 1) {
+   607→   607→          throw new Error(`العميل «${cust.name}» مؤرشف — أعد تفعيله من شاشة الأطراف أولاً`);
+   608→   608→        }
+   609→   609→        if (refType === null || refType === undefined) refType = 'on_account'; // القبض الحر الافتراضي — FIFO
+   610→   610→        if (refType !== 'on_account' && refType !== 'invoice') {
+   611→   611→          throw new Error('مرجع القبض يجب أن يكون «فاتورة محددة» أو «على الحساب» — اختر أحد الخيارين');
+   612→   612→        }
+   613→   613→        if (refType === 'invoice') {
+   614→   614→          if (refId === null || refId === undefined) {
+   615→   615→            throw new Error('القبض على فاتورة محددة يتطلب اختيار الفاتورة من قائمة فواتير العميل الآجلة');
+   616→   616→          }
+   617→   617→          const invRows = await db.all<{
+   618→   618→            id: number; invoice_no: string | null; doc_type: string; status: string; pay_status: string;
+   619→   619→            currency_id: number; customer_id: number;
+   620→   620→          }>('SELECT id, invoice_no, doc_type, status, pay_status, currency_id, customer_id FROM invoice WHERE id = ?', [refId]);
+   621→   621→          const inv = invRows[0];
+   622→   622→          if (
+   623→   623→            inv === undefined ||
+   624→   624→            inv.doc_type !== 'sale' ||
+   625→   625→            inv.status !== 'completed' ||
+   626→   626→            Number(inv.customer_id) !== customerId
+   627→   627→          ) {
+   628→   628→            throw new Error('الفاتورة المحددة ليست فاتورة بيع مكتملة لهذا العميل — أعد اختيار الفاتورة');
+   629→   629→          }
+   630→   630→          if (inv.pay_status === 'cash') {
+   631→   631→            throw new Error('الفاتورة المحددة نقديّة مسددة بالكامل — لا يمكن تحصيلها مرتين');
+   632→   632→          }
+   633→   633→          if (Number(inv.currency_id) !== v.currencyId) {
+   634→   634→            throw new Error('عملة الصندوق تختلف عن عملة الفاتورة — اختر صندوقاً بعملة الفاتورة نفسها');
+   635→   635→          }
+   636→   636→          const remaining = (await invoiceRemainingDue(db, refId, 'customer_id')).toDecimalPlaces(4);
+   637→   637→          if (amount.greaterThan(remaining)) {
+   638→   638→            throw new Error(
+   639→   639→              `المبلغ يتجاوز المتبقي على الفاتورة (المتبقي ${money(remaining)}) — ` +
+   640→   640→                'خفّض المبلغ أو استخدم «على الحساب» ليُخصم الفائض من الفواتير الأقدم أولاً',
+   641→   641→            );
+   642→   642→          }
+   643→   643→        }
+   644→   644→      } else if (refType === 'on_account' || refType === 'invoice') {
+   645→   645→        throw new Error('القبض على الحساب أو على فاتورة محددة يتطلب اختيار العميل أولاً');
+   646→   646→      }
+   647→   647→    }
+   648→   648→
+   649→   649→    if (v.txType === 'payment') {
+   650→   650→      if (customerId !== null) {
+   651→   651→        throw new Error('سند الصرف يخص دفعاً لمورّد — أزل العميل أو استخدم «قبض تحصيل من عميل»');
+   652→   652→      }
+   653→   653→      if (supplierId !== null) {
+   654→   654→        const supRows = await db.all<{ id: number; name: string; is_archived: number }>(
+   655→   655→          'SELECT id, name, is_archived FROM supplier WHERE id = ?',
+   656→   656→          [supplierId],
+   657→   657→        );
+   658→   658→        const sup = supRows[0];
+   659→   659→        if (sup === undefined) {
+   660→   660→          throw new Error(`مورّد غير موجود (رقم ${supplierId}) — أعد اختيار المورّد`);
+   661→   661→        }
+   662→   662→        if (Number(sup.is_archived) === 1) {
+   663→   663→          throw new Error(`المورّد «${sup.name}» مؤرشف — أعد تفعيله من شاشة الأطراف أولاً`);
+   664→   664→        }
+   665→   665→        if (refType === null || refType === undefined) refType = 'on_account';
+   666→   666→        if (refType !== 'on_account' && refType !== 'invoice') {
+   667→   667→          throw new Error('مرجع الصرف يجب أن يكون «فاتورة محددة» أو «على الحساب» — اختر أحد الخيارين');
+   668→   668→        }
+   669→   669→        if (refType === 'invoice') {
+   670→   670→          if (refId === null || refId === undefined) {
+   671→   671→            throw new Error('الدفع على فاتورة محددة يتطلب اختيار فاتورة الشراء من قائمة المورّد');
+   672→   672→          }
+   673→   673→          const invRows = await db.all<{
+   674→   674→            id: number; doc_type: string; status: string; pay_status: string; currency_id: number; supplier_id: number;
+   675→   675→          }>('SELECT id, doc_type, status, pay_status, currency_id, supplier_id FROM invoice WHERE id = ?', [refId]);
+   676→   676→          const inv = invRows[0];
+   677→   677→          if (
+   678→   678→            inv === undefined ||
+   679→   679→            inv.doc_type !== 'purchase' ||
+   680→   680→            inv.status !== 'completed' ||
+   681→   681→            Number(inv.supplier_id) !== supplierId
+   682→   682→          ) {
+   683→   683→            throw new Error('الفاتورة المحددة ليست فاتورة شراء مكتملة لهذا المورّد — أعد اختيار الفاتورة');
+   684→   684→          }
+   685→   685→          if (inv.pay_status === 'cash') {
+   686→   686→            throw new Error('فاتورة الشراء المحددة نقديّة مسددة بالكامل — لا يمكن دفعها مرتين');
+   687→   687→          }
+   688→   688→          if (Number(inv.currency_id) !== v.currencyId) {
+   689→   689→            throw new Error('عملة الصندوق تختلف عن عملة فاتورة الشراء — اختر صندوقاً بعملة الفاتورة نفسها');
+   690→   690→          }
+   691→   691→          const remaining = (await invoiceRemainingDue(db, refId, 'supplier_id')).toDecimalPlaces(4);
+   692→   692→          if (amount.greaterThan(remaining)) {
+   693→   693→            throw new Error(
+   694→   694→              `المبلغ يتجاوز المتبقي على فاتورة الشراء (المتبقي ${money(remaining)}) — خفّض المبلغ أو ادفع الباقي على الحساب`,
+   695→   695→            );
+   696→   696→          }
+   697→   697→        }
+   698→   698→      } else if (refType === 'on_account' || refType === 'invoice') {
+   699→   699→        throw new Error('الدفع على الحساب أو على فاتورة محددة يتطلب اختيار المورّد أولاً');
+   700→   700→      }
+   701→   701→    }
+   702→   702→
+   703→   703→    if (v.txType === 'owner_draw' || v.txType === 'capital_in' || v.txType === 'bank_deposit' || v.txType === 'bank_withdraw' || v.txType === 'opening') {
+   704→   704→      if (customerId !== null || supplierId !== null) {
+   705→   705→        throw new Error('هذا النوع من الحركات لا يرتبط بعميل أو مورّد — أزل الطرف أو غيّر نوع الحركة');
+   706→   706→      }
+   707→   707→      customerId = null;
+   708→   708→      supplierId = null;
+   709→   709→      refType = null;
+   710→   710→      refId = null;
+   711→   711→    }
+   712→   712→
+   713→   713→    // 5) حسابات التحويل بين عملتين (قرار 8 / FR-04-07)
+   714→   714→    let toAmount: Decimal | null = null;
+   715→   715→    let rateDst: string | null = null;
+   716→   716→    let fx = dec(0);
+   717→   717→    if (v.txType === 'box_transfer' && destBox !== null) {
+   718→   718→      refType = 'transfer';
+   719→   719→      refId = null; // يُربط بالساق الأولى بعد إدراجها (مفتاح الزوج)
+   720→   720→      if (customerId !== null || supplierId !== null) {
+   721→   721→        throw new Error('التحويل بين صندوقين لا يرتبط بأطراف — أزل العميل/المورّد');
+   722→   722→      }
+   723→   723→      const sameCurrency = Number(destBox.currency_id) === v.currencyId;
+   724→   724→      rateDst = sameCurrency
+   725→   725→        ? rateSrc.rate
+   726→   726→        : (await getRateSnapshot(Number(destBox.currency_id), txDate)).rate;
+   727→   727→      const amountBase = amount.times(dec(rateSrc.rate)); // قيمة المبلغ بالعملة الأساسية
+   728→   728→      toAmount =
+   729→   729→        v.toAmount !== undefined
+   730→   730→          ? dec(v.toAmount)
+   731→   731→          : roundTo(amountBase.div(dec(rateDst)), Number(destBox.decimals));
+   732→   732→      if (toAmount.lessThanOrEqualTo(0)) {
+   733→   733→        throw new Error('المبلغ المحوّل بعملة الوجهة يجب أن يكون أكبر من صفر — راجع سعر الصرف أو المبلغ المدخل');
+   734→   734→      }
+   735→   735→      // فرق الصرف المحقق (بقيمة الأساس): قيمة ما وصل − قيمة ما خرج (قرار 8)
+   736→   736→      fx = roundTo(toAmount.times(dec(rateDst)).minus(amountBase), 4);
+   737→   737→    }
+   738→   738→
+   739→   739→    // 6) الإدراج
+   740→   740→    const uid = getCurrentUserId() ?? null;
+   741→   741→    const amountStr = money(amount);
+   742→   742→    let sourceId: number;
+   743→   743→
+   744→   744→    if (v.txType === 'box_transfer') {
+   745→   745→      const destId = v.toCashboxId as number;
+   746→   746→      // الساق الصادرة من المصدر بعملته
+   747→   747→      const res = await db.run(
+   748→   748→        'INSERT INTO cash_tx(tx_type, cashbox_id, to_cashbox_id, currency_id, amount, exchange_rate, tx_date, ' +
+   749→   749→          'ref_type, ref_id, customer_id, supplier_id, expense_category_id, description, created_at, created_by) ' +
+   750→   750→          "VALUES('box_transfer', ?, ?, ?, ?, ?, ?, 'transfer', NULL, NULL, NULL, NULL, ?, ?, ?)",
+   751→   751→        [v.cashboxId, destId, v.currencyId, amountStr, rateSrc.rate, txDate, description, now, uid],
+   752→   752→      );
+   753→   753→      sourceId = Number(res.lastInsertRowId);
+   754→   754→      await db.run('UPDATE cash_tx SET ref_id = ? WHERE id = ?', [sourceId, sourceId]);
+   755→   755→
+   756→   756→      if (toAmount !== null && rateDst !== null && Number(destBox!.currency_id) !== v.currencyId) {
+   757→   757→        // الساق الواردة إلى الوجهة بعملتها + settlement_rate + fx_gain_loss (قرار 8)
+   758→   758→        await db.run(
+   759→   759→          'INSERT INTO cash_tx(tx_type, cashbox_id, to_cashbox_id, currency_id, amount, exchange_rate, settlement_rate, ' +
+   760→   760→            'fx_gain_loss, tx_date, ref_type, ref_id, customer_id, supplier_id, description, created_at, created_by) ' +
+   761→   761→          "VALUES('box_transfer', ?, ?, ?, ?, ?, ?, ?, ?, 'transfer', ?, NULL, NULL, ?, ?, ?)",
+   762→   762→          [
+   763→   763→            v.cashboxId,
+   764→   764→            destId,
+   765→   765→            Number(destBox!.currency_id),
+   766→   766→            money(toAmount),
+   767→   767→            rateDst,
+   768→   768→            rateDst,
+   769→   769→            money(fx),
+   770→   770→            txDate,
+   771→   771→            sourceId,
+   772→   772→            description,
+   773→   773→            now,
+   774→   774→            uid,
+   775→   775→          ],
+   776→   776→        );
+   777→   777→      }
+   778→   778→    } else {
+   779→   779→      const res = await db.run(
+   780→   780→        'INSERT INTO cash_tx(tx_type, cashbox_id, to_cashbox_id, currency_id, amount, exchange_rate, tx_date, ' +
+   781→   781→          'ref_type, ref_id, expense_category_id, customer_id, supplier_id, description, created_at, created_by) ' +
+   782→   782→          'VALUES(?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+   783→   783→        [
+   784→   784→          v.txType,
+   785→   785→          v.cashboxId,
+   786→   786→          v.currencyId,
+   787→   787→          amountStr,
+   788→   788→          rateSrc.rate,
+   789→   789→          txDate,
+   790→   790→          refType,
+   791→   791→          refId,
+   792→   792→          expenseCategoryId,
+   793→   793→          customerId,
+   794→   794→          supplierId,
+   795→   795→          description,
+   796→   796→          now,
+   797→   797→          uid,
+   798→   798→        ],
+   799→   799→      );
+   800→   800→      sourceId = Number(res.lastInsertRowId);
+   801→   801→    }
+   802→   802→
+   803→   803→    // 7) تخصيص FIFO للقبض الحر (نفس المعاملة — قاعدة 5.4-6)
+   804→   804→    if (v.txType === 'receipt' && customerId !== null && refType === 'on_account') {
+   805→   805→      await allocateReceiptFifo(db, sourceId, customerId, amount, now);
+   806→   806→    }
+   807→   807→
+   808→   808→    // 7-ب) القبض/الصرف على فاتورة محددة: تخصيص مباشر بنفس النمط الذي تتبعه
+   809→   809→    // لحظة البيع (applyCashIn) — يربط السند بفاتورته لأعمار الديون والتقارير
+   810→   810→    if ((v.txType === 'receipt' || v.txType === 'payment') && refType === 'invoice' && refId !== null) {
+   811→   811→      await db.run(
+   812→   812→        'INSERT INTO payment_allocation(cash_tx_id, invoice_id, allocated_amount, allocated_at, created_by) VALUES(?, ?, ?, ?, ?)',
+   813→   813→        [sourceId, refId, amountStr, now, uid],
+   814→   814→      );
+   815→   815→    }
+   816→   816→
+   817→   817→    // 8) الرصيد الجديد (قرار 9: بلا فحص — للتحذير في الواجهة)
+   818→   818→    const flows = await sumBoxFlows(db, v.cashboxId, {});
+   819→   819→    const newBalance = money(flows.in.minus(flows.out));
+   820→   820→
+   821→   821→    // 9) تدقيق الحوافز (FR-12-04 يوصي بـ owner_draw تحديداً)
+   822→   822→    if (v.txType === 'owner_draw') {
+   823→   823→      await logAudit('owner_draw', {
+   824→   824→        entity: 'cash_tx',
+   825→   825→        entityId: sourceId,
+   826→   826→        details: { amount: amountStr, cashboxId: v.cashboxId, description },
+   827→   827→      });
+   828→   828→    }
+   829→   829→
+   830→   830→    return { id: sourceId, voucherNo: null, newBalance };
+   831→   831→  });
+   832→   832→}
+   833→   833→
+   834→   834→// ============ الإلغاء — حركة معاكسة (FR-04-08) ============
+   835→   835→
+   836→   836→export async function voidCashTx(id: number, opts: { managerConfirmed: boolean; reason?: string }): Promise<void> {
+   837→   837→  if (opts.managerConfirmed !== true) {
+   838→   838→    throw new Error('إلغاء حركة النقدية يتطلب صلاحية المدير — أكّد الإلغاء من نافذة التأكيد أولاً');
+   839→   839→  }
+   840→   840→  return runSerialized(() => voidCashTxCore(id, opts));
+   841→   841→}
+   842→   842→
+   843→   843→async function voidCashTxCore(id: number, opts: { managerConfirmed: boolean; reason?: string }): Promise<void> {
+   844→   844→  const db = await getDb();
+   845→   845→  await db.transaction(async () => {
+   846→   846→    const rows = await db.all<CashTxLegRow>('SELECT * FROM cash_tx WHERE id = ?', [id]);
+   847→   847→    const t = rows[0];
+   848→   848→    if (t === undefined) {
+   849→   849→      throw new Error(`حركة نقدية غير موجودة (رقم ${id}) — لا يمكن إلغاؤها`);
+   850→   850→    }
+   851→   851→    if (Number(t.is_voided) === 1) {
+   852→   852→      throw new Error('هذه الحركة ملغاة مسبقاً — لا يمكن إلغاؤها مرتين');
+   853→   853→    }
+   854→   854→    if (t.reversal_of !== null) {
+   855→   855→      throw new Error('هذه حركة معاكسة لإلغاء سابق — لا تُلغى، ألغِ الحركة الأصلية نفسها');
+   856→   856→    }
+   857→   857→    if (DOCUMENT_BOUND_REFS.has(String(t.ref_type))) {
+   858→   858→      throw new Error(
+   859→   859→        'هذه الحركة مرتبطة بمستند (فاتورة أو مرتجع) — إلغاؤها يتم من شاشة المستند نفسه ' +
+   860→   860→          'ليُعكس كامل أثره (المخزون والصندوق والحسابات) معاً',
+   861→   861→      );
+   862→   862→    }
+   863→   863→
+   864→   864→    // ساقا التحويل تُلغيان معاً ذرّياً (زوج ref_type='transfer' + ref_id واحد)
+   865→   865→    const legs: CashTxLegRow[] =
+   866→   866→      t.ref_type === 'transfer' && t.ref_id !== null
+   867→   867→        ? await db.all<CashTxLegRow>(
+   868→   868→            "SELECT * FROM cash_tx WHERE ref_type = 'transfer' AND ref_id = ? AND is_voided = 0",
+   869→   869→            [Number(t.ref_id)],
+   870→   870→          )
+   871→   871→        : [t];
+   872→   872→
+   873→   873→    const now = new Date().toISOString();
+   874→   874→    const reversalIds: number[] = [];
+   875→   875→    for (const leg of legs) {
+   876→   876→      await db.run('UPDATE cash_tx SET is_voided = 1 WHERE id = ?', [Number(leg.id)]);
+   877→   877→      const opposite = REVERSAL_TYPE[String(leg.tx_type)] ?? 'receipt';
+   878→   878→      const swapBoxes = leg.tx_type === 'box_transfer';
+   879→   879→      const res = await db.run(
+   880→   880→        'INSERT INTO cash_tx(tx_type, cashbox_id, to_cashbox_id, currency_id, amount, exchange_rate, tx_date, ' +
+   881→   881→          'ref_type, ref_id, expense_category_id, customer_id, supplier_id, is_voided, reversal_of, description, created_at, created_by) ' +
+   882→   882→          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',
+   883→   883→        [
+   884→   884→          opposite,
+   885→   885→          swapBoxes ? Number(leg.to_cashbox_id ?? leg.cashbox_id) : Number(leg.cashbox_id),
+   886→   886→          swapBoxes ? Number(leg.cashbox_id) : (leg.to_cashbox_id === null ? null : Number(leg.to_cashbox_id)),
+   887→   887→          Number(leg.currency_id),
+   888→   888→          money(leg.amount),
+   889→   889→          money(leg.exchange_rate),
+   890→   890→          todayISO(),
+   891→   891→          leg.ref_type,
+   892→   892→          leg.ref_id === null ? null : Number(leg.ref_id),
+   893→   893→          leg.expense_category_id === null ? null : Number(leg.expense_category_id),
+   894→   894→          leg.customer_id === null ? null : Number(leg.customer_id),
+   895→   895→          leg.supplier_id === null ? null : Number(leg.supplier_id),
+   896→   896→          Number(leg.id),
+   897→   897→          `حركة معاكسة لإلغاء الحركة رقم ${Number(leg.id)}${opts.reason !== undefined && opts.reason.length > 0 ? ` — السبب: ${opts.reason}` : ''}`,
+   898→   898→          now,
+   899→   899→          getCurrentUserId() ?? null,
+   900→   900→        ],
+   901→   901→      );
+   902→   902→      reversalIds.push(Number(res.lastInsertRowId));
+   903→   903→    }
+   904→   904→
+   905→   905→    await logAudit('void_cash_tx', {
+   906→   906→      entity: 'cash_tx',
+   907→   907→      entityId: Number(t.id),
+   908→   908→      details: { reason: opts.reason ?? null, reversalIds, txType: String(t.tx_type) },
+   909→   909→    });
+   910→   910→  });
+   911→   911→}
+   912→   912→
+   913→   913→// ============ السند المرقّم (FR-04-10 — يُستهلك عند الطباعة الأولى فقط) ============
+   914→   914→
+   915→   915→/**
+   916→   916→ * استهلاك رقم سند RVT (قبض) / PMT (غير القبض) عبر doc_sequence — مرة واحدة.
+   917→   917→ * الاستدعاء الثاني لنفس الحركة يعيد نفس الرقم دون استهلاك جديد (حارس idempotent).
+   918→   918→ */
+   919→   919→export async function consumeVoucherNo(cashTxId: number): Promise<string> {
+   920→   920→  return runSerialized(async () => {
+   921→   921→    const db = await getDb();
+   922→   922→    return db.transaction(async () => {
+   923→   923→      const rows = await db.all<{
+   924→   924→        id: number; tx_type: string; tx_date: string; voucher_no: string | null; is_voided: number; reversal_of: number | null;
+   925→   925→      }>('SELECT id, tx_type, tx_date, voucher_no, is_voided, reversal_of FROM cash_tx WHERE id = ?', [cashTxId]);
+   926→   926→      const t = rows[0];
+   927→   927→      if (t === undefined) {
+   928→   928→        throw new Error(`حركة نقدية غير موجودة (رقم ${cashTxId}) — لا يمكن طباعة سندها`);
+   929→   929→      }
+   930→   930→      if (Number(t.is_voided) === 1) {
+   931→   931→        throw new Error('لا يمكن طباعة سند لحركة ملغاة — الحركة ملغاة وأثرها معكوس');
+   932→   932→      }
+   933→   933→      if (t.reversal_of !== null) {
+   934→   934→        throw new Error('لا يمكن طباعة سند لحركة معاكسة — اطبع سند الحركة الأصلية');
+   935→   935→      }
+   936→   936→      if (t.voucher_no !== null && t.voucher_no.length > 0) {
+   937→   937→        return t.voucher_no; // استُهلك سابقاً — نفس الرقم دائماً
+   938→   938→      }
+   939→   939→
+   940→   940→      const docType = t.tx_type === 'receipt' ? ('RVT' as const) : ('PMT' as const);
+   941→   941→      const { docNo } = await nextDocNumber(docType, { date: String(t.tx_date) });
+   942→   942→      const res = await db.run('UPDATE cash_tx SET voucher_no = ? WHERE id = ? AND voucher_no IS NULL', [docNo, cashTxId]);
+   943→   943→      if (res.changes === 0) {
+   944→   944→        // سبق استهلاكه (تسابق نظري) — أعد قراءة الرقم القائم
+   945→   945→        const again = await db.all<{ voucher_no: string | null }>('SELECT voucher_no FROM cash_tx WHERE id = ?', [cashTxId]);
+   946→   946→        if (again[0]?.voucher_no !== null && again[0]?.voucher_no !== undefined) return again[0].voucher_no;
+   947→   947→        throw new Error('تعذر ترقيم السند — أعد محاولة الطباعة');
+   948→   948→      }
+   949→   949→      await logAudit('voucher_print', {
+   950→   950→        entity: 'cash_tx',
+   951→   951→        entityId: cashTxId,
+   952→   952→        details: { voucherNo: docNo, txType: String(t.tx_type) },
+   953→   953→      });
+   954→   954→      return docNo;
+   955→   955→    });
+   956→   956→  });
+   957→   957→}
+   958→   958→
+   959→   959→// ============ قائمة الحركات ============
+   960→   960→
+   961→   961→export async function listCashTx(opts: {
+   962→   962→  cashboxId?: number;
+   963→   963→  dateFrom?: string;
+   964→   964→  dateTo?: string;
+   965→   965→  txType?: string;
+   966→   966→  limit?: number;
+   967→   967→}): Promise<CashTxRow[]> {
+   968→   968→  const db = await getDb();
+   969→   969→  const limit = Math.max(1, Math.min(opts.limit ?? 100, 500));
+   970→   970→
+   971→   971→  const where: string[] = [];
+   972→   972→  const params: unknown[] = [];
+   973→   973→  if (opts.cashboxId !== undefined) {
+   974→   974→    // «يلمس الصندوق»: صادرة منه أو واردة إليه (تحويل)
+   975→   975→    where.push('(t.cashbox_id = ? OR (t.tx_type = \'box_transfer\' AND t.to_cashbox_id = ?))');
+   976→   976→    params.push(opts.cashboxId, opts.cashboxId);
+   977→   977→  }
+   978→   978→  if (opts.dateFrom !== undefined) {
+   979→   979→    where.push('t.tx_date >= ?');
+   980→   980→    params.push(opts.dateFrom);
+   981→   981→  }
+   982→   982→  if (opts.dateTo !== undefined) {
+   983→   983→    where.push('t.tx_date <= ?');
+   984→   984→    params.push(opts.dateTo);
+   985→   985→  }
+   986→   986→  if (opts.txType !== undefined && opts.txType.length > 0) {
+   987→   987→    where.push('t.tx_type = ?');
+   988→   988→    params.push(opts.txType);
+   989→   989→  }
+   990→   990→
+   991→   991→  const rows = await db.all<{
+   992→   992→    id: number; tx_type: string; tx_date: string; amount: string | number; currency_id: number;
+   993→   993→    exchange_rate: string | number; settlement_rate: string | number | null; fx_gain_loss: string | number;
+   994→   994→    voucher_no: string | null; ref_type: string | null; ref_id: number | null; is_voided: number;
+   995→   995→    reversal_of: number | null; description: string | null; cashbox_id: number; cashbox_name: string | null;
+   996→   996→    to_cashbox_id: number | null; to_cashbox_name: string | null; customer_id: number | null; customer_name: string | null;
+   997→   997→    supplier_id: number | null; supplier_name: string | null; expense_category_id: number | null;
+   998→   998→    expense_category_name: string | null; currency_code: string; currency_decimals: number;
+   999→   999→  }>(
+  1000→  1000→    `SELECT t.id, t.tx_type, t.tx_date, t.amount, t.currency_id, t.exchange_rate, t.settlement_rate, t.fx_gain_loss,
+  1001→  1001→            t.voucher_no, t.ref_type, t.ref_id, t.is_voided, t.reversal_of, t.description,
+  1002→  1002→            t.cashbox_id, cb.name AS cashbox_name, t.to_cashbox_id, tcb.name AS to_cashbox_name,
+  1003→  1003→            t.customer_id, cu.name AS customer_name, t.supplier_id, su.name AS supplier_name,
+  1004→  1004→            t.expense_category_id, ec.name AS expense_category_name,
+  1005→  1005→            c.code AS currency_code, c.decimals AS currency_decimals
+  1006→  1006→     FROM cash_tx t
+  1007→  1007→     LEFT JOIN cashbox cb ON cb.id = t.cashbox_id
+  1008→  1008→     LEFT JOIN cashbox tcb ON tcb.id = t.to_cashbox_id
+  1009→  1009→     LEFT JOIN customer cu ON cu.id = t.customer_id
+  1010→  1010→     LEFT JOIN supplier su ON su.id = t.supplier_id
+  1011→  1011→     LEFT JOIN expense_category ec ON ec.id = t.expense_category_id
+  1012→  1012→     LEFT JOIN currency c ON c.id = t.currency_id
+  1013→  1013→     ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+  1014→  1014→     ORDER BY t.tx_date DESC, t.id DESC
+  1015→  1015→     LIMIT ?`,
+  1016→  1016→    [...params, limit],
+  1017→  1017→  );
+  1018→  1018→
+  1019→  1019→  return rows.map((r) => {
+  1020→  1020→    const fx = dec(r.fx_gain_loss);
+  1021→  1021→    const direction: CashTxRow['direction'] =
+  1022→  1022→      r.tx_type === 'box_transfer' ? 'transfer' : IN_TYPES.has(r.tx_type) ? 'in' : 'out';
+  1023→  1023→    return {
+  1024→  1024→      id: Number(r.id),
+  1025→  1025→      txType: String(r.tx_type),
+  1026→  1026→      txDate: String(r.tx_date),
+  1027→  1027→      amount: money(r.amount),
+  1028→  1028→      currencyId: Number(r.currency_id),
+  1029→  1029→      currencyCode: r.currency_code ?? '',
+  1030→  1030→      currencyDecimals: Number(r.currency_decimals ?? 2),
+  1031→  1031→      cashboxId: Number(r.cashbox_id),
+  1032→  1032→      cashboxName: r.cashbox_name,
+  1033→  1033→      toCashboxId: r.to_cashbox_id === null ? null : Number(r.to_cashbox_id),
+  1034→  1034→      toCashboxName: r.to_cashbox_name,
+  1035→  1035→      customerId: r.customer_id === null ? null : Number(r.customer_id),
+  1036→  1036→      customerName: r.customer_name,
+  1037→  1037→      supplierId: r.supplier_id === null ? null : Number(r.supplier_id),
+  1038→  1038→      supplierName: r.supplier_name,
+  1039→  1039→      expenseCategoryId: r.expense_category_id === null ? null : Number(r.expense_category_id),
+  1040→  1040→      expenseCategoryName: r.expense_category_name,
+  1041→  1041→      refType: r.ref_type,
+  1042→  1042→      refId: r.ref_id === null ? null : Number(r.ref_id),
+  1043→  1043→      description: r.description,
+  1044→  1044→      voucherNo: r.voucher_no,
+  1045→  1045→      exchangeRate: money(r.exchange_rate),
+  1046→  1046→      settlementRate: r.settlement_rate === null || r.settlement_rate === undefined ? null : money(r.settlement_rate),
+  1047→  1047→      fxGainLoss: money(fx),
+  1048→  1048→      isVoided: Number(r.is_voided) === 1,
+  1049→  1049→      isReversal: r.reversal_of !== null,
+  1050→  1050→      hasFx: !fx.isZero(),
+  1051→  1051→      direction,
+  1052→  1052→    };
+  1053→  1053→  });
+  1054→  1054→}
+  1055→  1055→
+  1056→  1056→// ============ الوردية (قرار 9 — المعادلة الشاملة FR-04-04) ============
+  1057→  1057→
+  1058→  1058→function mapShiftRow(r: {
+  1059→  1059→  id: number; cashbox_id: number; user_id: number | null; opened_at: string; closed_at: string | null;
+  1060→  1060→  opening_count: string | number | null; expected: string | number | null; counted: string | number | null;
+  1061→  1061→  difference: string | number | null; notes: string | null;
+  1062→  1062→}): ShiftRow {
+  1063→  1063→  return {
+  1064→  1064→    id: Number(r.id),
+  1065→  1065→    cashboxId: Number(r.cashbox_id),
+  1066→  1066→    userId: r.user_id === null ? null : Number(r.user_id),
+  1067→  1067→    openedAt: String(r.opened_at),
+  1068→  1068→    closedAt: r.closed_at,
+  1069→  1069→    openingCount: r.opening_count === null ? null : money(r.opening_count),
+  1070→  1070→    expected: r.expected === null ? null : money(r.expected),
+  1071→  1071→    counted: r.counted === null ? null : money(r.counted),
+  1072→  1072→    difference: r.difference === null ? null : money(r.difference),
+  1073→  1073→    notes: r.notes,
+  1074→  1074→  };
+  1075→  1075→}
+  1076→  1076→
+  1077→  1077→/** فتح وردية على صندوق — يرفض إن كانت هناك وردية مفتوحة عليه. */
+  1078→  1078→export async function openShift(cashboxId: number, openingCount: string): Promise<number> {
+  1079→  1079→  if (!/^\d+(\.\d+)?$/.test(openingCount ?? '')) {
+  1080→  1080→    throw new Error('رصيد العد الافتتاحي يجب أن يكون رقماً غير سالب مثل «15000»');
+  1081→  1081→  }
+  1082→  1082→  const db = await getDb();
+  1083→  1083→  return runSerialized(() =>
+  1084→  1084→    db.transaction(async () => {
+  1085→  1085→      const boxRows = await db.all<{ id: number; name: string; is_archived: number }>(
+  1086→  1086→        'SELECT id, name, is_archived FROM cashbox WHERE id = ?',
+  1087→  1087→        [cashboxId],
+  1088→  1088→      );
+  1089→  1089→      const box = boxRows[0];
+  1090→  1090→      if (box === undefined) {
+  1091→  1091→        throw new Error(`صندوق غير موجود (رقم ${cashboxId}) — لا يمكن فتح وردية عليه`);
+  1092→  1092→      }
+  1093→  1093→      if (Number(box.is_archived) === 1) {
+  1094→  1094→        throw new Error(`الصندوق «${box.name}» مؤرشف — لا يمكن فتح وردية عليه`);
+  1095→  1095→      }
+  1096→  1096→      const open = await db.all<{ id: number }>(
+  1097→  1097→        'SELECT id FROM shift WHERE cashbox_id = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1',
+  1098→  1098→        [cashboxId],
+  1099→  1099→      );
+  1100→  1100→      if (open.length > 0) {
+  1101→  1101→        throw new Error('هناك وردية مفتوحة بالفعل على هذا الصندوق — أقفلها أولاً ثم افتح وردية جديدة');
+  1102→  1102→      }
+  1103→  1103→      const now = new Date().toISOString();
+  1104→  1104→      const res = await db.run(
+  1105→  1105→        'INSERT INTO shift(cashbox_id, user_id, opened_at, opening_count, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)',
+  1106→  1106→        [cashboxId, getCurrentUserId(), now, money(dec(openingCount)), now, now],
+  1107→  1107→      );
+  1108→  1108→      const shiftId = Number(res.lastInsertRowId);
+  1109→  1109→      await logAudit('shift_open', {
+  1110→  1110→        entity: 'shift',
+  1111→  1111→        entityId: shiftId,
+  1112→  1112→        details: { cashboxId, openingCount: money(dec(openingCount)) },
+  1113→  1113→      });
+  1114→  1114→      return shiftId;
+  1115→  1115→    }),
+  1116→  1116→  );
+  1117→  1117→}
+  1118→  1118→
+  1119→  1119→/**
+  1120→  1120→ * المعادلة الشاملة الحية (قرار 9): كل حركة غير ملغاة/غير معاكسة في نافذة الوردية
+  1121→  1121→ * بعملة الصندوق: موجبة لـ (receipt/capital_in/bank_deposit/opening أو تحويل وارد إلى الصندوق)
+  1122→  1122→ * وسالبة لـ (payment/expense/owner_draw/bank_withdraw أو تحويل صادر من الصندوق).
+  1123→  1123→ * (دقة tx_date يومية — النافذة من تاريخ الفتح حتى اليوم.)
+  1124→  1124→ */
+  1125→  1125→export async function shiftExpected(cashboxId: number, openedAt: string): Promise<ShiftSummary> {
+  1126→  1126→  const db = await getDb();
+  1127→  1127→  const flows = await sumBoxFlows(db, cashboxId, { dateFrom: openedAt.slice(0, 10), dateTo: todayISO() });
+  1128→  1128→  return {
+  1129→  1129→    cashboxId,
+  1130→  1130→    openedAt,
+  1131→  1131→    expectedIn: money(flows.in),
+  1132→  1132→    expectedOut: money(flows.out),
+  1133→  1133→    expected: money(flows.in.minus(flows.out)),
+  1134→  1134→  };
+  1135→  1135→}
+  1136→  1136→
+  1137→  1137→/**
+  1138→  1138→ * إقفال الوردية: يسجل المتوقع (وارد − صادر خلال النافذة) والعد الفعلي والفرق
+  1139→  1139→ * (الفرق = العد الفعلي − [الرصيد الافتتاحي + المتوقع] — العد يشمل الدرج كاملاً)
+  1140→  1140→ * + قيد تدقيق. يعيد { expected, difference }.
+  1141→  1141→ */
+  1142→  1142→export async function closeShift(shiftId: number, counted: string, notes?: string): Promise<{ expected: string; difference: string }> {
+  1143→  1143→  if (!/^\d+(\.\d+)?$/.test(counted ?? '')) {
+  1144→  1144→    throw new Error('العد الفعلي يجب أن يكون رقماً غير سالب مثل «14500»');
+  1145→  1145→  }
+  1146→  1146→  const db = await getDb();
+  1147→  1147→  return runSerialized(() =>
+  1148→  1148→    db.transaction(async () => {
+  1149→  1149→      const rows = await db.all<{
+  1150→  1150→        id: number; cashbox_id: number; opened_at: string; closed_at: string | null; opening_count: string | number | null;
+  1151→  1151→      }>('SELECT id, cashbox_id, opened_at, closed_at, opening_count FROM shift WHERE id = ?', [shiftId]);
+  1152→  1152→      const sh = rows[0];
+  1153→  1153→      if (sh === undefined) {
+  1154→  1154→        throw new Error(`وردية غير موجودة (رقم ${shiftId}) — لا يمكن إقفالها`);
+  1155→  1155→      }
+  1156→  1156→      if (sh.closed_at !== null) {
+  1157→  1157→        throw new Error('هذه الوردية مقفلة مسبقاً — لا يمكن إقفالها مرتين');
+  1158→  1158→      }
+  1159→  1159→
+  1160→  1160→      const summary = await shiftExpected(Number(sh.cashbox_id), String(sh.opened_at));
+  1161→  1161→      const countedD = dec(counted);
+  1162→  1162→      const drawerExpected = dec(sh.opening_count ?? 0).plus(dec(summary.expected));
+  1163→  1163→      const difference = roundTo(countedD.minus(drawerExpected), 4);
+  1164→  1164→
+  1165→  1165→      const now = new Date().toISOString();
+  1166→  1166→      await db.run(
+  1167→  1167→        'UPDATE shift SET closed_at = ?, expected = ?, counted = ?, difference = ?, notes = ?, updated_at = ? WHERE id = ?',
+  1168→  1168→        [now, summary.expected, money(countedD), money(difference), notes?.trim() || null, now, shiftId],
+  1169→  1169→      );
+  1170→  1170→      await logAudit('shift_close', {
+  1171→  1171→        entity: 'shift',
+  1172→  1172→        entityId: shiftId,
+  1173→  1173→        details: {
+  1174→  1174→          cashboxId: Number(sh.cashbox_id),
+  1175→  1175→          expected: summary.expected,
+  1176→  1176→          counted: money(countedD),
+  1177→  1177→          difference: money(difference),
+  1178→  1178→        },
+  1179→  1179→      });
+  1180→  1180→      return { expected: summary.expected, difference: money(difference) };
+  1181→  1181→    }),
+  1182→  1182→  );
+  1183→  1183→}
+  1184→  1184→
+  1185→  1185→/** الوردية المفتوحة حالياً على صندوق (أو null). */
+  1186→  1186→export async function currentShift(cashboxId: number): Promise<ShiftRow | null> {
+  1187→  1187→  const db = await getDb();
+  1188→  1188→  const rows = await db.all<{
+  1189→  1189→    id: number; cashbox_id: number; user_id: number | null; opened_at: string; closed_at: string | null;
+  1190→  1190→    opening_count: string | number | null; expected: string | number | null; counted: string | number | null;
+  1191→  1191→    difference: string | number | null; notes: string | null;
+  1192→  1192→  }>('SELECT * FROM shift WHERE cashbox_id = ? AND closed_at IS NULL ORDER BY id DESC LIMIT 1', [cashboxId]);
+  1193→  1193→  return rows.length === 0 ? null : mapShiftRow(rows[0]);
+  1194→  1194→}
+  1195→  1195→
+  1196→  1196→/** آخر وردية على صندوق (مفتوحة أو مقفلة) — لعرض سجل الإقفال مباشرة بعد الإغلاق. */
+  1197→  1197→export async function lastShift(cashboxId: number): Promise<ShiftRow | null> {
+  1198→  1198→  const db = await getDb();
+  1199→  1199→  const rows = await db.all<{
+  1200→  1200→    id: number; cashbox_id: number; user_id: number | null; opened_at: string; closed_at: string | null;
+  1201→  1201→    opening_count: string | number | null; expected: string | number | null; counted: string | number | null;
+  1202→  1202→    difference: string | number | null; notes: string | null;
+  1203→  1203→  }>('SELECT * FROM shift WHERE cashbox_id = ? ORDER BY id DESC LIMIT 1', [cashboxId]);
+  1204→  1204→  return rows.length === 0 ? null : mapShiftRow(rows[0]);
+  1205→  1205→}
+  1206→  1206→
+  1207→  1207→// ============ فئات المصاريف (FR-04-05) ============
+  1208→  1208→
+  1209→  1209→export async function listExpenseCategories(): Promise<ExpenseCategoryRow[]> {
+  1210→  1210→  const db = await getDb();
+  1211→  1211→  const rows = await db.all<{ id: number; name: string }>(
+  1212→  1212→    'SELECT id, name FROM expense_category WHERE is_archived = 0 ORDER BY name COLLATE NOCASE ASC',
+  1213→  1213→  );
+  1214→  1214→  return rows.map((r) => ({ id: Number(r.id), name: r.name }));
+  1215→  1215→}
+  1216→  1216→
+  1217→  1217→export async function upsertExpenseCategory(id: number | null, name: string): Promise<number> {
+  1218→  1218→  const clean = (name ?? '').trim();
+  1219→  1219→  if (clean.length === 0) {
+  1220→  1220→    throw new Error('اسم فئة المصروف مطلوب — أدخل اسماً مثل «نظافة»');
+  1221→  1221→  }
+  1222→  1222→  if (clean.length > 60) {
+  1223→  1223→    throw new Error('اسم فئة المصروف طويل (الحد 60 حرفاً)');
+  1224→  1224→  }
+  1225→  1225→  const db = await getDb();
+  1226→  1226→  const dupRows = await db.all<{ id: number }>(
+  1227→  1227→    'SELECT id FROM expense_category WHERE is_archived = 0 AND name = ? COLLATE NOCASE',
+  1228→  1228→    [clean],
+  1229→  1229→  );
+  1230→  1230→  const dup = dupRows.find((r) => id === null || Number(r.id) !== id);
+  1231→  1231→  if (dup !== undefined) {
+  1232→  1232→    throw new Error(`فئة المصروف «${clean}» موجودة مسبقاً — استخدم الفئة القائمة`);
+  1233→  1233→  }
+  1234→  1234→  if (id === null) {
+  1235→  1235→    const res = await db.run('INSERT INTO expense_category(name, is_archived, created_at, created_by) VALUES(?, 0, ?, ?)', [
+  1236→  1236→      clean,
+  1237→  1237→      new Date().toISOString(),
+  1238→  1238→      getCurrentUserId() ?? null,
+  1239→  1239→    ]);
+  1240→  1240→    return Number(res.lastInsertRowId);
+  1241→  1241→  }
+  1242→  1242→  const exists = await db.all<{ id: number }>('SELECT id FROM expense_category WHERE id = ?', [id]);
+  1243→  1243→  if (exists.length === 0) {
+  1244→  1244→    throw new Error(`فئة مصروف غير موجودة (رقم ${id}) — لا يمكن تعديلها`);
+  1245→  1245→  }
+  1246→  1246→  await db.run('UPDATE expense_category SET name = ?, updated_at = ? WHERE id = ?', [
+  1247→  1247→    clean,
+  1248→  1248→    new Date().toISOString(),
+  1249→  1249→    id,
+  1250→  1250→  ]);
+  1251→  1251→  return id;
+  1252→  1252→}
+  1253→  1253→

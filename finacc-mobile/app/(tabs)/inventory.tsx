@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Pressable } from 'react-native';
 import { useFocusEffect, router } from 'expo-router';
-import { Bell, Box, FolderTree, Plus, Ruler } from 'lucide-react-native';
+import { Bell, Box, ClipboardCheck, FolderTree, Plus, Ruler } from 'lucide-react-native';
 import {
   AmountText,
   EmptyState,
@@ -108,6 +108,7 @@ export default function InventoryScreen() {
         />
         <View style={s.manageRow}>
           <ManageTile icon={<Bell size={20} color={colors.warning} />} label={t.alerts} onPress={() => router.push('/inventory/alerts')} />
+          <ManageTile icon={<ClipboardCheck size={20} color={colors.accent} />} label={t.stocktakeEntry} onPress={() => router.push('/inventory/stocktake')} />
           <ManageTile icon={<FolderTree size={20} color={colors.accent} />} label={t.categories} onPress={() => router.push('/inventory/categories')} />
           <ManageTile icon={<Ruler size={20} color={colors.success} />} label={t.units} onPress={() => router.push('/inventory/units')} />
         </View>

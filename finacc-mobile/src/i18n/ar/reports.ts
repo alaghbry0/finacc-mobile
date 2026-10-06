@@ -1,2 +1,122 @@
-/** نصوص وحدة reports — تملؤها الموجة المسؤولة */
-export const reports: Record<string, string> = {};
+/**
+ * نصوص وحدة التقارير + الداشبورد (الوحدة 09 — FR-09) — تستخدم عبر `ar.reports`.
+ * المعارض: معرض التقارير + العارض العام (فلترة فترة + جدول حسب النوع)
+ * + بنود قائمة الأرباح (قرار 7) + بطاقات تنبيه الداشبورد ورسمه.
+ */
+
+export const reports = {
+  // ===== معرض التقارير (شاشة /reports) =====
+  galleryTitle: 'التقارير',
+  gallerySubtitle: 'كل التقارير تعمل من بياناتك بلا إنترنت',
+  galleryEmptyTitle: 'لا تقارير بعد',
+  galleryEmptyMessage: 'ستظهر التقارير هنا فور توفر بيانات — ابدأ بفاتورة واحدة على الأقل',
+
+  // ===== بطاقات المعرض =====
+  plTitle: 'الأرباح والخسائر',
+  plDesc: 'الصيغة الكاملة: مبيعات، تكلفة، جرد، مصاريف، فروق صرف — وصافي ما بقي للمالك',
+  byCustomerTitle: 'المبيعات حسب العميل',
+  byCustomerDesc: 'صافي مبيعات كل عميل بفواتيره ومرتجعاته',
+  byProductTitle: 'المبيعات حسب الصنف',
+  byProductDesc: 'الكميات المبيعة وقيمتها ومرتجعاتها لكل صنف',
+  byDayTitle: 'المبيعات حسب اليوم',
+  byDayDesc: 'يوم بيوم مع مقارنة الفترة السابقة ونسبة التغير',
+  productCardTitle: 'بطاقة صنف',
+  productCardDesc: 'كل حركات صنف بالباقي التراكمي لفترة ومخزن',
+  stockSummaryTitle: 'ملخص حركة المخزون',
+  stockSummaryDesc: 'وارد وصادر ومرتجع وتسوية لكل صنف بالفترة',
+  agingTitle: 'أعمار الديون',
+  agingDesc: 'أرصدة العملاء الآجلة مصنفة 0-30 / 31-60 / 61-90 / +90 يوماً',
+  minStockTitle: 'الأصناف تحت الحد الأدنى',
+  minStockDesc: 'الأصناف التي هبط رصيدها تحت حد التنبيه',
+
+  // ===== العارض العام (/reports/[reportId]) =====
+  periodLabel: 'الفترة',
+  fromLabel: 'من',
+  toLabel: 'إلى',
+  runLabel: 'عرض',
+  quickThisMonth: 'هذا الشهر',
+  quickLastMonth: 'الشهر الماضي',
+  quickThisWeek: 'هذا الأسبوع',
+  quickToday: 'اليوم',
+  quickAll: 'الكل',
+  printLabel: 'طباعة التقرير',
+  printDisabledHint: 'طباعة التقارير توصلها الموجة القادمة (6-ب)',
+  reportEmptyTitle: 'لا بيانات في هذه الفترة',
+  reportEmptyMessage: 'جرّب توسيع الفترة أو اختيار فترة أخرى فيها حركة',
+  reportErrorTitle: 'تعذر توليد التقرير',
+  pickProduct: 'اختر الصنف',
+  pickProductHint: 'بطاقة الصنف تحتاج صنفاً محدداً — اختره من القائمة',
+  pickWarehouse: 'المستودع (اختياري)',
+  allWarehouses: 'كل المخازن',
+  currencyNote: 'كل الأرقام بالعملة الأساس {code}',
+
+  // ===== قائمة الأرباح (قرار 7 — FR-09-02) =====
+  plSales: 'المبيعات',
+  plSalesReturns: 'مرتجع المبيعات',
+  plNetSales: 'صافي المبيعات',
+  plCogs: 'تكلفة المبيعات (COGS)',
+  plCogsReturned: 'تكلفة المرتجع',
+  plNetCogs: 'صافي التكلفة',
+  plStocktakeGains: 'زيادات الجرد',
+  plStocktakeLosses: 'عجز الجرد',
+  plExpenses: 'المصاريف',
+  plExpensesByCategory: 'المصاريف بالفئات',
+  plFx: 'فروق الصرف المحققة',
+  plGrossProfit: 'الربح قبل المصاريف',
+  plNetProfit: 'صافي الربح',
+  plOwnerDraws: 'مسحوبات المالك',
+  plNetForOwner: 'صافي ما بقي للمالك',
+  plNetForOwnerHint: 'صافي الربح بعد المسحوبات — المسحوبات بند مستقل ليست مصاريف',
+  plFormulaNote: 'الربح = (المبيعات − المرتجع) − (COGS − تكلفة المرتجع) + زيادات الجرد − عجزه − المصاريف ± فروق الصرف',
+
+  // ===== رؤوس الأعمدة العامة =====
+  colCustomer: 'العميل',
+  colSupplier: 'المورّد',
+  colProduct: 'الصنف',
+  colSales: 'المبيعات',
+  colReturns: 'المرتجعات',
+  colNet: 'الصافي',
+  colInvoices: 'الفواتير',
+  colQtySold: 'الكمية',
+  colQty: 'الكمية',
+  colDate: 'التاريخ',
+  colTotal: 'الإجمالي',
+  colOnHand: 'الرصيد',
+  colMin: 'الحد',
+  colShortBy: 'النقص',
+  colValue: 'القيمة',
+  colIn: 'وارد',
+  colOut: 'صادر',
+  colAdjust: 'تسوية',
+  colOpening: 'افتتاحي',
+  colClosing: 'ختامي',
+  colBalance: 'الرصيد',
+  colUnitCost: 'التكلفة',
+  colRefNo: 'المرجع',
+  colType: 'النوع',
+  colCurrency: 'العملة',
+  // أعمدة الأعمار
+  colCurrent: '0–30',
+  colD30: '31–60',
+  colD60: '61–90',
+  colD90: '+90',
+  agingAsOf: 'حتى تاريخ',
+  agingByInvoice: 'أعمار فواتير الآجل المتبقي بتخصيص FIFO (الأقدم أولاً)',
+
+  // ===== مقارنة الفترات =====
+  prevPeriodLabel: 'الفترة السابقة',
+  changePctLabel: 'نسبة التغير',
+  noPrevPeriod: 'لا مبيعات في الفترة السابقة — لا نسبة تغيير',
+
+  // ===== الداشبورد (تكملة tabs.ts — §6.5) =====
+  dashChartTitle: 'مبيعات آخر 30 يوماً',
+  dashChartEmpty: 'لا مبيعات في آخر 30 يوماً — ابدأ البيع وسترى الرسم ينمو هنا',
+  dashTopTitle: 'الأكثر مبيعاً هذا الشهر',
+  dashTopEmpty: 'لا مبيعات هذا الشهر بعد',
+  dashAlertsTitle: 'تنبيهات تحتاج انتباهك',
+  dashDueInstallments: 'أقساط مستحقة اليوم',
+  dashMinStock: 'أصناف تحت الحد الأدنى',
+  dashDueCheques: 'شيكات مستحقة قريباً',
+  dashMonthSales: 'مبيعات الشهر',
+  dashTopQty: '{qty} وحدة',
+} as const;

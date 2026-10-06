@@ -25,6 +25,7 @@ import {
 import { AmountPadField } from '@/screens/inventory/AmountPadSheet';
 import { CustomerPickerSheet } from '@/screens/sales/CustomerPickerSheet';
 import { DailyRateSheet } from '@/screens/invoices/DailyRateSheet';
+import { InvoicePrintSheet } from '@/screens/invoices/InvoicePrintSheet';
 import { VoidInvoiceSheet } from '@/screens/invoices/VoidInvoiceSheet';
 import { PlanFormSheet } from '@/screens/installments/PlanFormSheet';
 import { common, invoices as t, installments as inst, purchases as p, sales as st } from '@/i18n/ar';
@@ -61,6 +62,7 @@ export default function SaleInvoiceDetailScreen() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<InvoiceFull | null>(null);
   const [returns, setReturns] = useState<LinkedReturnRow[]>([]);
+  const [partyPhone, setPartyPhone] = useState<string | null>(null);
 
   const [printOpen, setPrintOpen] = useState(false);
   const [voidOpen, setVoidOpen] = useState(false);
@@ -92,12 +94,23 @@ export default function SaleInvoiceDetailScreen() {
         setData(null);
         setError(t.notFound);
       } else {
+        const db = await getDb();
         setData(full);
         setCustomerId(full.invoice.customerId);
         setCustomerName(full.customerName);
+        // هاتف العميل (للمشاركة واتساب من شيت الطباعة)
+        if (full.invoice.customerId !== null) {
+          const phoneRows = await db.all<{ phone: string | null }>('SELECT phone FROM customer WHERE id = ?', [
+            full.invoice.customerId,
+          ]);
+          setPartyPhone(phoneRows[0]?.phone ?? null);
+        } else {
+          setPartyPhone(null);
+        }
         // المرتجعات المرتبطة — استعلام محلي (getSaleInvoice لا يشملها)
-        const db = await getDb();
-        const rows = await db.all<{ id: number; invoice_no: string | null; issued_at: string; total: string | number; status: string }>(
+        const rows = await db.all<{
+          id: number; invoice_no: string | null; issued_at: string; total: string | number; status: string;
+        }>(
           "SELECT id, invoice_no, issued_at, total, status FROM invoice " +
             "WHERE original_invoice_id = ? AND doc_type = 'sale_return' ORDER BY issued_at DESC, id DESC",
           [invoiceId],
@@ -430,17 +443,14 @@ export default function SaleInvoiceDetailScreen() {
 
       {/* ============ الشيتات ============ */}
 
-      {/* الطباعة/المشاركة — قوالب الموجة 6 */}
-      <BottomSheet visible={printOpen} onClose={() => setPrintOpen(false)} title={t.printSheetTitle}>
-        <View style={s.sheetBody}>
-          <View style={s.printIcon}>
-            <Printer size={38} color={colors.muted} />
-          </View>
-          <Text style={s.sheetMessage}>{t.printComingSoon}</Text>
-          <PrimaryButton label={t.printAction} disabled onPress={() => undefined} />
-          <SecondaryButton label={common.close} onPress={() => setPrintOpen(false)} />
-        </View>
-      </BottomSheet>
+      {/* الطباعة/المشاركة — الوحدة 10 (الموجة 6-b) */}
+      <InvoicePrintSheet
+        visible={printOpen}
+        onClose={() => setPrintOpen(false)}
+        kind="sale"
+        invoiceId={invoiceId}
+        partyPhone={partyPhone}
+      />
 
       {/* إلغاء الفاتورة */}
       <VoidInvoiceSheet

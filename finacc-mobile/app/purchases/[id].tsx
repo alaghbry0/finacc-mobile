@@ -1,20 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
-import { AlertTriangle, FileText, Printer, RotateCcw } from 'lucide-react-native';
+import { AlertTriangle, FileText, RotateCcw } from 'lucide-react-native';
 import {
   AmountText,
   AppCard,
-  BottomSheet,
   ErrorState,
   ListRow,
   LoadingSkeleton,
-  PrimaryButton,
   Screen,
   SecondaryButton,
   SectionTitle,
   StatusChip,
 } from '@/components';
+import { InvoicePrintSheet } from '@/screens/invoices/InvoicePrintSheet';
 import { VoidInvoiceSheet } from '@/screens/invoices/VoidInvoiceSheet';
 import { common, invoices as t, purchases as p } from '@/i18n/ar';
 import { getPurchaseInvoice, voidPurchaseInvoice, type PurchaseInvoiceFull } from '@/domain/purchasing';
@@ -283,17 +282,14 @@ export default function PurchaseInvoiceDetailScreen() {
 
       <View style={s.bottomSpace} />
 
-      {/* الطباعة/المشاركة — قوالب الموجة 6 */}
-      <BottomSheet visible={printOpen} onClose={() => setPrintOpen(false)} title={t.printSheetTitle}>
-        <View style={s.sheetBody}>
-          <View style={s.printIcon}>
-            <Printer size={38} color={colors.muted} />
-          </View>
-          <Text style={s.sheetMessage}>{t.printComingSoon}</Text>
-          <PrimaryButton label={t.printAction} disabled onPress={() => undefined} />
-          <SecondaryButton label={common.close} onPress={() => setPrintOpen(false)} />
-        </View>
-      </BottomSheet>
+      {/* الطباعة/المشاركة — الوحدة 10 (الموجة 6-b) */}
+      <InvoicePrintSheet
+        visible={printOpen}
+        onClose={() => setPrintOpen(false)}
+        kind="purchase"
+        invoiceId={invoiceId}
+        partyPhone={data.supplierPhone}
+      />
 
       {/* إلغاء فاتورة الشراء */}
       <VoidInvoiceSheet

@@ -1,2 +1,43 @@
-/** نصوص وحدة backup — تملؤها الموجة المسؤولة */
-export const backup: Record<string, string> = {};
+/** نصوص وحدة النسخ الاحتياطي (الوحدة 11) — الموجة 6-b. */
+export const backup = {
+  title: 'النسخ الاحتياطي والاستعادة',
+  sectionCreate: 'نسخة الآن',
+  createNow: 'إنشاء نسخة الآن',
+  createBusy: 'يُنشأ ملف النسخة…',
+  createSuccess: (name: string, size: string): string => `أُنشئت النسخة ${name} (${size})`,
+  createFailed: 'تعذر إنشاء النسخة — أعد المحاولة',
+  webDownloadHint: 'على الويب يُنزَّل ملف القاعدة إلى مجلد التنزيلات — احفظه في مكان آمن (درايف/ذاكرة)',
+  shareLatest: 'مشاركة آخر نسخة',
+  shareWebHint: 'على الويب الملف عندك في التنزيلات — أرسله يدوياً من هناك',
+
+  sectionRestore: 'الاستعادة',
+  restoreNow: 'استعادة من ملف…',
+  restoreTitle: 'استعادة نسخة احتياطية',
+  restoreWarning:
+    'سيستبدل كل البيانات الحالية بمحتوى ملف النسخة المختار — تُنشأ نسخة أمان تلقائية للقاعدة الحالية قبل الاستبدال، ثم يُعاد تحميل التطبيق.',
+  restoreWord: 'استعادة',
+  restoreBusy: 'يُفحص الملف ويُستبدل…',
+  restoreSuccessWeb: 'استُبدلت القاعدة — يُعاد تحميل التطبيق الآن',
+  restoreNativeRestart: 'تمت الاستعادة — أعد تشغيل التطبيق ليعمل بالنسخة الجديدة',
+  restoreFailed: 'فشلت الاستعادة — القاعدة الحالية لم تُمس',
+
+  sectionSchedule: 'الجدولة (FR-11-04)',
+  scheduleLabel: 'نسخة تلقائية صامتة',
+  scheduleHint: 'عند فتح التطبيق إذا مضى المحدد — تُحفظ داخلياً بلا تنزيل',
+  scheduleDaily: 'يومي',
+  scheduleWeekly: 'أسبوعي',
+  scheduleOff: 'إيقاف',
+  retentionLabel: 'عدد النسخ المحفوظة',
+  retentionHint: 'تُحذف النسخ الصامتة الأقدم تلقائياً (1–30) — سجل النسخ اليدوية يبقى',
+
+  sectionLog: 'سجل النسخ (FR-11-06)',
+  logEmpty: 'لا نسخ بعد — أنشئ أول نسخة الآن',
+  logKindManual: 'يدوية',
+  logKindAuto: 'تلقائية',
+  logKindPreRestore: 'أمان استعادة',
+  logColAt: 'التاريخ',
+  logColKind: 'النوع',
+  logColSize: 'الحجم',
+  logColStatus: 'الحالة',
+  lastBackupNever: 'لم تُنشأ نسخة بعد',
+} as const;

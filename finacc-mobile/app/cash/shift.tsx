@@ -35,6 +35,8 @@ import {
 import { useToastStore } from '@/store/toast';
 import { dec } from '@/utils/money';
 import { todayISO } from '@/utils/format';
+import { printShiftReport } from '@/services/doc-print';
+import { printing as pr } from '@/i18n/ar';
 import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
 
 /** الوردية (FR-04-04): فتح بعدّ افتتاحي → معادلة حية → إقفال بعدّ فعلي واعتماد الفرق. */
@@ -58,6 +60,7 @@ export default function ShiftScreen() {
 
   // إقفال الوردية
   const [closeSheet, setCloseSheet] = useState(false);
+  const [printBusy, setPrintBusy] = useState(false);
   const [counted, setCounted] = useState('');
   const [closeNotes, setCloseNotes] = useState('');
   const [closeBusy, setCloseBusy] = useState(false);
@@ -172,6 +175,20 @@ export default function ShiftScreen() {
     }
   };
 
+  // ---- طباعة تقرير الوردية بعد الإقفال (الوحدة 10 — الموجة 6-b) ----
+  const doPrintShiftReport = async () => {
+    if (closed === null || printBusy) return;
+    setPrintBusy(true);
+    try {
+      const name = boxes.find((b) => b.id === closed.cashboxId)?.name ?? '';
+      await printShiftReport(closed, name);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : pr.shiftPrintFailed, { duration: 7000 });
+    } finally {
+      setPrintBusy(false);
+    }
+  };
+
   if (loading) {
     return (
       <Screen title={t.shiftTitle} onBack={() => router.back()}>
@@ -201,6 +218,16 @@ export default function ShiftScreen() {
           {result !== null ? <CloseResultCard expected={result.expected} difference={result.difference} /> : null}
 
           {closed !== null && result === null ? <ClosedRecordCard row={closed} /> : null}
+
+          {/* طباعة تقرير الوردية بعد الإقفال — FR-10-05 */}
+          {closed !== null ? (
+            <SecondaryButton
+              label={printBusy ? pr.printBusy : pr.printShiftReport}
+              onPress={() => void doPrintShiftReport()}
+              disabled={printBusy}
+              style={s.printReportBtn}
+            />
+          ) : null}
 
           {shift === null ? (
             /* لا وردية مفتوحة */
@@ -476,6 +503,7 @@ const s = StyleSheet.create({
     color: colors.textPrimary,
   },
   closeBtn: { marginTop: spacing.md, marginBottom: spacing.lg },
+  printReportBtn: { marginTop: spacing.md },
 
   // نتيجة الإقفال
   resultCard: {

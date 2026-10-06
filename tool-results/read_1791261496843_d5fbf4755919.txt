@@ -1,0 +1,769 @@
+     1→import { z } from 'zod';
+     2→import { getDb } from '@/db/client';
+     3→import type { DbEngine } from '@/db/types';
+     4→import { dec, money, roundTo, Decimal } from '@/utils/money';
+     5→import { todayISO } from '@/utils/format';
+     6→import { getRateSnapshot } from './currency';
+     7→import { logAudit } from './audit';
+     8→import { getCurrentUserId } from './session-user';
+     9→
+    10→/**
+    11→ * الشيكات (الوحدة 14 — تتبع مصغّر):
+    12→ *
+    13→ * ── المبدأ المحاسبي (FR-14-02) ────────────────────────────────────────────
+    14→ * الشيك قبل `cleared` ذمّة «شيكات تحت التحصيل» فقط: لا يمس الصندوق ولا يخصم
+    15→ * رصيد الطرف. عند `cleared` فقط تُنشأ حركة الصندوق (قبض للوارد/صرف للصادر)
+    16→ * بعملة الشيك وسعر يوم التحصيل + تُسوّى الديون (تخصيصاً على الفاتورة
+    17→ * المرجعية أو FIFO على الأقدم بعملة الشيك) + تُحتسب فروق الصرف المحققة.
+    18→ *
+    19→ * ── قرارات موثقة داخل هذا الملف ───────────────────────────────────────────
+    20→ * 1) ربط حركة التحصيل بالطرف: cash_tx يحمل customer_id/supplier_id وref_type
+    21→ *    ∈ ('invoice','on_account') — نفس مصفوفة معادلة رصيد الطرف (3-b) — فيخصم
+    22→ *    الرصيد تلقائياً بلا كود إضافي. الربط بالشيك محفوظ عبر cheque.cleared_cash_tx_id.
+    23→ * 2) الفرق على القسط... لا — فروق الصرف (FR-08-10): تُحتسب فقط عند اختلاف
+    24→ *    عملة الشيك عن عملة الفاتورة المسدّاة: fx = قيمة الشيك بالأساس بسعر اليوم −
+    25→ *    المخصص على الفاتورة × سعر الفاتورة الأصلي. لا تُدفن في أي رصيد (قرار 8).
+    26→ * 3) الارتداد (FR-14-04): لا عكس تسوية — التسوية لا تُنشأ إلا عند cleared
+    27→ *    والارتداد مسموح من pending/deposited فقط، فبقاء الدين هو «العودة» نفسها.
+    28→ *    رسم الارتداد مصروف نقدي اختياري بعملة الشيك وسعر اليوم + فئة إلزامية.
+    29→ * 4) التسلسل (runSerialized): نفس مبرر invoicing.ts — معاملات sql.js المتوازية
+    30→ *    تتحول لـ SAVEPOINTs متداخلة.
+    31→ */
+    32→
+    33→// ============ الأنواع والعقود ============
+    34→
+    35→export interface ChequeInput {
+    36→  direction: 'in' | 'out';
+    37→  partyType: 'customer' | 'supplier';
+    38→  partyId: number;
+    39→  chequeNo: string;
+    40→  bankName?: string;
+    41→  amount: string;
+    42→  currencyId: number;
+    43→  issueDate?: string;
+    44→  dueDate: string;
+    45→  refInvoiceId?: number | null;
+    46→  notes?: string;
+    47→}
+    48→
+    49→export type ChequeStatus = 'pending' | 'deposited' | 'cleared' | 'bounced' | 'void';
+    50→export type ChequeDirection = 'in' | 'out';
+    51→
+    52→export interface ChequeRow {
+    53→  id: number;
+    54→  direction: ChequeDirection;
+    55→  partyType: 'customer' | 'supplier';
+    56→  partyId: number;
+    57→  partyName: string;
+    58→  chequeNo: string;
+    59→  bankName: string | null;
+    60→  amount: string;
+    61→  currencyId: number;
+    62→  currencyCode: string;
+    63→  decimals: number;
+    64→  exchangeRate: string;
+    65→  issueDate: string;
+    66→  dueDate: string;
+    67→  status: ChequeStatus;
+    68→  refInvoiceId: number | null;
+    69→  refInvoiceNo: string | null;
+    70→  notes: string | null;
+    71→}
+    72→
+    73→export interface ChequeFull extends ChequeRow {
+    74→  bouncedAt: string | null;
+    75→  bounceFee: string;
+    76→  clearedCashTxId: number | null;
+    77→  createdAt: string | null;
+    78→  /** حركة الصندوق المنشأة عند التحصيل (إن وُجدت). */
+    79→  clearedTx: {
+    80→    id: number;
+    81→    txType: string;
+    82→    amount: string;
+    83→    txDate: string;
+    84→    cashboxName: string | null;
+    85→    fxGainLoss: string;
+    86→    settlementRate: string | null;
+    87→  } | null;
+    88→  /** حركة مصروف رسم الارتداد (إن وُجدت). */
+    89→  bounceFeeTxId: number | null;
+    90→}
+    91→
+    92→export interface ListChequesOpts {
+    93→  status?: string;
+    94→  direction?: string;
+    95→  limit?: number;
+    96→}
+    97→
+    98→// ============ التحقق (zod) ============
+    99→
+   100→const POS_MONEY_RE = /^\d+(\.\d+)?$/;
+   101→const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+   102→
+   103→const ChequeSchema = z.object({
+   104→  direction: z.enum(['in', 'out']),
+   105→  partyType: z.enum(['customer', 'supplier']),
+   106→  partyId: z.number().int().positive('رقم الطرف غير صالح'),
+   107→  chequeNo: z.string().trim().min(1, 'رقم الشيك مطلوب').max(60, 'رقم الشيك طويل جداً (الحد 60 حرفاً)'),
+   108→  bankName: z.string().trim().max(120, 'اسم البنك طويل جداً').optional(),
+   109→  amount: z
+   110→    .string()
+   111→    .regex(POS_MONEY_RE, 'مبلغ الشيك يجب أن يكون رقماً أكبر من صفر')
+   112→    .refine((s) => dec(s).greaterThan(0), { message: 'مبلغ الشيك يجب أن يكون أكبر من صفر' }),
+   113→  currencyId: z.number().int().positive('عملة الشيك مطلوبة'),
+   114→  issueDate: z.string().regex(ISO_DATE_RE, 'تاريخ الإصدار يجب أن يكون بصيغة YYYY-MM-DD').optional(),
+   115→  dueDate: z.string().regex(ISO_DATE_RE, 'تاريخ الاستحقاق يجب أن يكون بصيغة YYYY-MM-DD'),
+   116→  refInvoiceId: z.number().int().positive().nullable().optional(),
+   117→  notes: z.string().trim().max(500, 'الملاحظات طويلة (الحد 500 حرف)').optional(),
+   118→});
+   119→
+   120→// ============ التسلسل (قرار 4 أعلاه) ============
+   121→
+   122→let writeChain: Promise<unknown> = Promise.resolve();
+   123→
+   124→function runSerialized<T>(fn: () => Promise<T>): Promise<T> {
+   125→  const next = writeChain.then(fn, fn);
+   126→  writeChain = next.catch(() => undefined);
+   127→  return next;
+   128→}
+   129→
+   130→// ============ مساعدات داخلية ============
+   131→
+   132→interface InvoiceLite {
+   133→  id: number;
+   134→  invoiceNo: string | null;
+   135→  docType: string;
+   136→  payStatus: string;
+   137→  status: string;
+   138→  currencyId: number;
+   139→  exchangeRate: string;
+   140→  dueAmount: string;
+   141→  issuedAt: string;
+   142→}
+   143→
+   144→/** المتاح للتحصيل على فاتورة = due_amount − التخصيصات غير الملغاة. */
+   145→async function invoiceOpenAmount(db: DbEngine, invoiceId: number): Promise<Decimal> {
+   146→  const rows = await db.all<{ due_amount: string | number }>('SELECT due_amount FROM invoice WHERE id = ?', [invoiceId]);
+   147→  const allocs = await db.all<{ a: string | number | null }>(
+   148→    'SELECT COALESCE(SUM(pa.allocated_amount), 0) AS a FROM payment_allocation pa ' +
+   149→      'JOIN cash_tx t ON t.id = pa.cash_tx_id AND t.is_voided = 0 ' +
+   150→      'WHERE pa.invoice_id = ?',
+   151→    [invoiceId],
+   152→  );
+   153→  return dec(rows[0]?.due_amount ?? 0).minus(dec(allocs[0]?.a ?? 0));
+   154→}
+   155→
+   156→async function loadInvoice(db: DbEngine, invoiceId: number): Promise<InvoiceLite | null> {
+   157→  const rows = await db.all<{
+   158→    id: number; invoice_no: string | null; doc_type: string; pay_status: string; status: string;
+   159→    customer_id: number | null; supplier_id: number | null; currency_id: number;
+   160→    exchange_rate: string | number; due_amount: string | number; issued_at: string;
+   161→  }>('SELECT * FROM invoice WHERE id = ?', [invoiceId]);
+   162→  const r = rows[0];
+   163→  if (r === undefined) return null;
+   164→  return {
+   165→    id: Number(r.id),
+   166→    invoiceNo: r.invoice_no,
+   167→    docType: r.doc_type,
+   168→    payStatus: r.pay_status,
+   169→    status: r.status,
+   170→    currencyId: Number(r.currency_id),
+   171→    exchangeRate: money(r.exchange_rate),
+   172→    dueAmount: money(r.due_amount),
+   173→    issuedAt: r.issued_at,
+   174→  };
+   175→}
+   176→
+   177→/** التحقق من الفاتورة المرجعية: ملكية الطرف + النوع + مكتملة + آجلة + مفتوحة. */
+   178→async function assertRefInvoice(
+   179→  db: DbEngine,
+   180→  input: { refInvoiceId: number; partyId: number; partyType: string; direction: string },
+   181→  chequeAmount: Decimal,
+   182→  chequeCurrencyId: number,
+   183→  today: string,
+   184→): Promise<void> {
+   185→  const inv = await loadInvoice(db, input.refInvoiceId);
+   186→  if (inv === null) {
+   187→    throw new Error('الفاتورة المرجعية غير موجودة — راجع الرابط أو أعد اختيار الفاتورة');
+   188→  }
+   189→  const expectedType = input.direction === 'in' ? 'sale' : 'purchase';
+   190→  const partyCol = input.partyType === 'customer' ? 'customer_id' : 'supplier_id';
+   191→  const rows = await db.all<{ pid: number | null }>(`SELECT ${partyCol} AS pid FROM invoice WHERE id = ?`, [
+   192→    input.refInvoiceId,
+   193→  ]);
+   194→  if (inv.docType !== expectedType || Number(rows[0]?.pid ?? 0) !== input.partyId) {
+   195→    throw new Error('الفاتورة المرجعية لا تعود لهذا الطرف — اختر فاتورة من فواتير الطرف نفسه');
+   196→  }
+   197→  if (inv.status !== 'completed') {
+   198→    throw new Error('لا يمكن ربط الشيك إلا بفاتورة مكتملة — الفاتورة المرجعية مسودة أو ملغاة');
+   199→  }
+   200→  if (inv.payStatus === 'cash') {
+   201→    throw new Error('الفاتورة المرجعية نقدية مسددة أصلاً — لا حاجة لربط شيك بها');
+   202→  }
+   203→  const open = await invoiceOpenAmount(db, input.refInvoiceId);
+   204→  if (open.lessThanOrEqualTo(0)) {
+   205→    throw new Error('الفاتورة المرجعية مسددة بالكامل — لا يمكن ربط شيك بها');
+   206→  }
+   207→  // قيمة الشيك بعملة الفاتورة (بأسعار اليوم — سياسة Snapshot الحركة)
+   208→  let amountInInvoiceCurrency = chequeAmount;
+   209→  if (inv.currencyId !== chequeCurrencyId) {
+   210→    const chequeRate = dec((await getRateSnapshot(chequeCurrencyId, today)).rate);
+   211→    const invRate = dec((await getRateSnapshot(inv.currencyId, today)).rate);
+   212→    amountInInvoiceCurrency = chequeAmount.times(chequeRate).div(invRate);
+   213→  }
+   214→  if (amountInInvoiceCurrency.greaterThan(open)) {
+   215→    throw new Error(
+   216→      `مبلغ الشيك يتجاوز المتاح على الفاتورة (المتاح ${money(open)} بعملة الفاتورة) — ` +
+   217→        'خفّض المبلغ أو احذف الفاتورة المرجعية ليوزَّع الشيك FIFO على حساب الطرف',
+   218→    );
+   219→  }
+   220→}
+   221→
+   222→// ============ الإنشاء (FR-14-01) ============
+   223→
+   224→export async function createCheque(input: ChequeInput): Promise<number> {
+   225→  const v = ChequeSchema.parse({
+   226→    ...input,
+   227→    bankName: input.bankName?.trim() || undefined,
+   228→    refInvoiceId: input.refInvoiceId ?? null,
+   229→  });
+   230→  return runSerialized(async () => {
+   231→    const db = await getDb();
+   232→    return db.transaction(async () => {
+   233→      const today = todayISO();
+   234→      const now = new Date().toISOString();
+   235→
+   236→      // وجود الطرف
+   237→      const table = v.partyType === 'customer' ? 'customer' : 'supplier';
+   238→      const party = await db.all<{ id: number; name: string }>(
+   239→        `SELECT id, name FROM ${table} WHERE id = ?`,
+   240→        [v.partyId],
+   241→      );
+   242→      if (party.length === 0) {
+   243→        throw new Error(
+   244→          v.partyType === 'customer'
+   245→            ? `عميل غير موجود (رقم ${v.partyId}) — أعد اختيار العميل`
+   246→            : `مورّد غير موجود (رقم ${v.partyId}) — أعد اختيار المورّد`,
+   247→        );
+   248→      }
+   249→
+   250→      // سعر يوم التسجيل (العملة الأساسية سعرها 1 دائماً)
+   251→      const snapshot = await getRateSnapshot(v.currencyId, today);
+   252→
+   253→      if (v.refInvoiceId !== null && v.refInvoiceId !== undefined) {
+   254→        await assertRefInvoice(
+   255→          db,
+   256→          { refInvoiceId: v.refInvoiceId, partyId: v.partyId, partyType: v.partyType, direction: v.direction },
+   257→          dec(v.amount),
+   258→          v.currencyId,
+   259→          today,
+   260→        );
+   261→      }
+   262→
+   263→      const res = await db.run(
+   264→        'INSERT INTO cheque(direction, party_type, party_id, cheque_no, bank_name, amount, currency_id, ' +
+   265→          'exchange_rate, issue_date, due_date, status, ref_invoice_id, notes, created_at, updated_at, created_by) ' +
+   266→          "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+   267→        [
+   268→          v.direction,
+   269→          v.partyType,
+   270→          v.partyId,
+   271→          v.chequeNo,
+   272→          v.bankName ?? null,
+   273→          money(dec(v.amount)),
+   274→          v.currencyId,
+   275→          snapshot.rate,
+   276→          v.issueDate ?? today,
+   277→          v.dueDate,
+   278→          v.refInvoiceId ?? null,
+   279→          v.notes ?? null,
+   280→          now,
+   281→          now,
+   282→          getCurrentUserId() ?? null,
+   283→        ],
+   284→      );
+   285→      const id = Number(res.lastInsertRowId);
+   286→      await logAudit('cheque_created', {
+   287→        entity: 'cheque',
+   288→        entityId: id,
+   289→        details: {
+   290→          direction: v.direction,
+   291→          partyType: v.partyType,
+   292→          partyId: v.partyId,
+   293→          chequeNo: v.chequeNo,
+   294→          amount: money(dec(v.amount)),
+   295→          currencyId: v.currencyId,
+   296→          rate: snapshot.rate,
+   297→          dueDate: v.dueDate,
+   298→          refInvoiceId: v.refInvoiceId ?? null,
+   299→        },
+   300→      });
+   301→      return id;
+   302→    });
+   303→  });
+   304→}
+   305→
+   306→// ============ القوائم والقراءة ============
+   307→
+   308→function mapChequeRow(r: Record<string, unknown>): ChequeRow {
+   309→  return {
+   310→    id: Number(r.id),
+   311→    direction: (r.direction as ChequeDirection) ?? 'in',
+   312→    partyType: (r.party_type as 'customer' | 'supplier') ?? 'customer',
+   313→    partyId: Number(r.party_id),
+   314→    partyName: String(r.party_name ?? ''),
+   315→    chequeNo: String(r.cheque_no ?? ''),
+   316→    bankName: (r.bank_name as string | null) ?? null,
+   317→    amount: money(r.amount as string | number),
+   318→    currencyId: Number(r.currency_id),
+   319→    currencyCode: String(r.currency_code ?? ''),
+   320→    decimals: Number(r.currency_decimals ?? 2),
+   321→    exchangeRate: money(r.exchange_rate as string | number),
+   322→    issueDate: String(r.issue_date ?? ''),
+   323→    dueDate: String(r.due_date ?? ''),
+   324→    status: (r.status as ChequeStatus) ?? 'pending',
+   325→    refInvoiceId: r.ref_invoice_id === null || r.ref_invoice_id === undefined ? null : Number(r.ref_invoice_id),
+   326→    refInvoiceNo: (r.invoice_no as string | null) ?? null,
+   327→    notes: (r.notes as string | null) ?? null,
+   328→  };
+   329→}
+   330→
+   331→const CHEQUE_LIST_SQL =
+   332→  'SELECT c.*, cur.code AS currency_code, cur.decimals AS currency_decimals, ' +
+   333→  'CASE WHEN c.party_type = \'customer\' THEN cu.name ELSE su.name END AS party_name, ' +
+   334→  'inv.invoice_no AS invoice_no ' +
+   335→  'FROM cheque c ' +
+   336→  'JOIN currency cur ON cur.id = c.currency_id ' +
+   337→  "LEFT JOIN customer cu ON c.party_type = 'customer' AND cu.id = c.party_id " +
+   338→  "LEFT JOIN supplier su ON c.party_type = 'supplier' AND su.id = c.party_id " +
+   339→  'LEFT JOIN invoice inv ON inv.id = c.ref_invoice_id ';
+   340→
+   341→export async function listCheques(opts?: ListChequesOpts): Promise<ChequeRow[]> {
+   342→  const db = await getDb();
+   343→  const conds: string[] = [];
+   344→  const params: unknown[] = [];
+   345→  if (opts?.status !== undefined && opts.status.length > 0 && opts.status !== 'all') {
+   346→    conds.push('c.status = ?');
+   347→    params.push(opts.status);
+   348→  }
+   349→  if (opts?.direction !== undefined && opts.direction.length > 0) {
+   350→    conds.push('c.direction = ?');
+   351→    params.push(opts.direction);
+   352→  }
+   353→  const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+   354→  const limit = Math.max(1, Math.min(500, opts?.limit ?? 200));
+   355→  const rows = await db.all<Record<string, unknown>>(
+   356→    `${CHEQUE_LIST_SQL} ${where} ORDER BY c.due_date ASC, c.id ASC LIMIT ?`,
+   357→    [...params, limit],
+   358→  );
+   359→  return rows.map(mapChequeRow);
+   360→}
+   361→
+   362→export async function getCheque(id: number): Promise<ChequeFull | null> {
+   363→  const db = await getDb();
+   364→  const rows = await db.all<Record<string, unknown>>(`${CHEQUE_LIST_SQL} WHERE c.id = ?`, [id]);
+   365→  const r = rows[0];
+   366→  if (r === undefined) return null;
+   367→  const base = mapChequeRow(r);
+   368→
+   369→  let clearedTx: ChequeFull['clearedTx'] = null;
+   370→  if (base.status === 'cleared' && r.cleared_cash_tx_id !== null && r.cleared_cash_tx_id !== undefined) {
+   371→    const tx = await db.all<{
+   372→      id: number; tx_type: string; amount: string | number; tx_date: string; fx_gain_loss: string | number;
+   373→      settlement_rate: string | number | null; cashbox_name: string | null;
+   374→    }>(
+   375→      'SELECT t.id, t.tx_type, t.amount, t.tx_date, t.fx_gain_loss, t.settlement_rate, cb.name AS cashbox_name ' +
+   376→        'FROM cash_tx t LEFT JOIN cashbox cb ON cb.id = t.cashbox_id WHERE t.id = ?',
+   377→      [Number(r.cleared_cash_tx_id)],
+   378→    );
+   379→    if (tx.length > 0) {
+   380→      clearedTx = {
+   381→        id: Number(tx[0].id),
+   382→        txType: tx[0].tx_type,
+   383→        amount: money(tx[0].amount),
+   384→        txDate: tx[0].tx_date,
+   385→        cashboxName: (tx[0].cashbox_name as string | null) ?? null,
+   386→        fxGainLoss: money(tx[0].fx_gain_loss),
+   387→        settlementRate:
+   388→          tx[0].settlement_rate === null || tx[0].settlement_rate === undefined
+   389→            ? null
+   390→            : money(tx[0].settlement_rate),
+   391→      };
+   392→    }
+   393→  }
+   394→
+   395→  const fee = await db.all<{ id: number }>(
+   396→    "SELECT id FROM cash_tx WHERE ref_type = 'cheque' AND ref_id = ? AND tx_type = 'expense' AND is_voided = 0",
+   397→    [id],
+   398→  );
+   399→
+   400→  return {
+   401→    ...base,
+   402→    bouncedAt: (r.bounced_at as string | null) ?? null,
+   403→    bounceFee: money((r.bounce_fee as string | number | null) ?? 0),
+   404→    clearedCashTxId:
+   405→      r.cleared_cash_tx_id === null || r.cleared_cash_tx_id === undefined ? null : Number(r.cleared_cash_tx_id),
+   406→    createdAt: (r.created_at as string | null) ?? null,
+   407→    clearedTx,
+   408→    bounceFeeTxId: fee[0] !== undefined ? Number(fee[0].id) : null,
+   409→  };
+   410→}
+   411→
+   412→// ============ دورة الحياة (FR-14-02..06) ============
+   413→
+   414→interface ChequeCore {
+   415→  id: number;
+   416→  direction: string;
+   417→  partyType: string;
+   418→  partyId: number;
+   419→  chequeNo: string;
+   420→  amount: string;
+   421→  currencyId: number;
+   422→  exchangeRate: string;
+   423→  status: string;
+   424→  refInvoiceId: number | null;
+   425→}
+   426→
+   427→async function loadCheque(db: DbEngine, id: number): Promise<ChequeCore> {
+   428→  const rows = await db.all<{
+   429→    id: number; direction: string; party_type: string; party_id: number; cheque_no: string;
+   430→    amount: string | number; currency_id: number; exchange_rate: string | number; status: string;
+   431→    ref_invoice_id: number | null;
+   432→  }>('SELECT id, direction, party_type, party_id, cheque_no, amount, currency_id, exchange_rate, status, ref_invoice_id FROM cheque WHERE id = ?', [id]);
+   433→  const r = rows[0];
+   434→  if (r === undefined) {
+   435→    throw new Error(`شيك غير موجود (رقم ${id}) — ربما حُذف الرابط، عد لقائمة الشيكات`);
+   436→  }
+   437→  return {
+   438→    id: Number(r.id),
+   439→    direction: r.direction,
+   440→    partyType: r.party_type,
+   441→    partyId: Number(r.party_id),
+   442→    chequeNo: r.cheque_no,
+   443→    amount: money(r.amount),
+   444→    currencyId: Number(r.currency_id),
+   445→    exchangeRate: money(r.exchange_rate),
+   446→    status: r.status,
+   447→    refInvoiceId: r.ref_invoice_id === null ? null : Number(r.ref_invoice_id),
+   448→  };
+   449→}
+   450→
+   451→function assertStatus(c: ChequeCore, allowed: string[], action: string): void {
+   452→  if (!allowed.includes(c.status)) {
+   453→    throw new Error(
+   454→      `لا يمكن ${action} شيك حالته «${c.status}» — الإجراء متاح للشيكات قيد التحصيل/المودَعة فقط`,
+   455→    );
+   456→  }
+   457→}
+   458→
+   459→/** pending → deposited (إيداع بالبنك — بلا أي أثر مالي). */
+   460→export async function markDeposited(id: number): Promise<void> {
+   461→  return runSerialized(async () => {
+   462→    const db = await getDb();
+   463→    return db.transaction(async () => {
+   464→      const c = await loadCheque(db, id);
+   465→      assertStatus(c, ['pending'], 'إيداع');
+   466→      await db.run("UPDATE cheque SET status = 'deposited', updated_at = ? WHERE id = ?", [
+   467→        new Date().toISOString(),
+   468→        id,
+   469→      ]);
+   470→      await logAudit('cheque_deposited', { entity: 'cheque', entityId: id, details: { chequeNo: c.chequeNo } });
+   471→    });
+   472→  });
+   473→}
+   474→
+   475→export interface MarkClearedOpts {
+   476→  cashboxId: number;
+   477→}
+   478→
+   479→/**
+   480→ * cleared (FR-14-03): سند قبض/صرف بعملة الشيك وسعر اليوم + تسوية الدين
+   481→ * (تخصيص على الفاتورة المرجعية أو FIFO) + فروق الصرف + قيد تدقيق.
+   482→ */
+   483→export async function markCleared(id: number, opts?: MarkClearedOpts): Promise<{ cashTxId: number }> {
+   484→  if (opts === undefined || !Number.isFinite(opts.cashboxId) || opts.cashboxId <= 0) {
+   485→    throw new Error('التحصيل يتطلب اختيار صندوق — اختر الصندوق الذي ستُحصَّل فيه قيمة الشيك');
+   486→  }
+   487→  return runSerialized(async () => {
+   488→    const db = await getDb();
+   489→    return db.transaction(async () => {
+   490→      const today = todayISO();
+   491→      const now = new Date().toISOString();
+   492→      const c = await loadCheque(db, id);
+   493→      assertStatus(c, ['pending', 'deposited'], 'تحصيل');
+   494→
+   495→      const box = await db.all<{ id: number; name: string }>('SELECT id, name FROM cashbox WHERE id = ?', [
+   496→        opts.cashboxId,
+   497→      ]);
+   498→      if (box.length === 0) {
+   499→        throw new Error('الصندوق المختار غير موجود — أعد اختيار الصندوق وحاول مجدداً');
+   500→      }
+   501→
+   502→      const amount = dec(c.amount);
+   503→      const isCustomer = c.partyType === 'customer';
+   504→      const txType = c.direction === 'in' ? 'receipt' : 'payment';
+   505→      const desc =
+   506→        c.direction === 'in'
+   507→          ? `تحصيل شيك رقم ${c.chequeNo}${box[0].name !== undefined ? ` — ${box[0].name}` : ''}`
+   508→          : `سداد شيك رقم ${c.chequeNo}${box[0].name !== undefined ? ` — ${box[0].name}` : ''}`;
+   509→
+   510→      // سعر يوم التحصيل (سياسة Snapshot)
+   511→      const txRateSnap = await getRateSnapshot(c.currencyId, today);
+   512→      const txRate = dec(txRateSnap.rate);
+   513→
+   514→      // ── أهداف التسوية ──
+   515→      // 1) فاتورة مرجعية (قد تكون بعملة مختلفة → تحويل + فرق صرف)
+   516→      // 2) وإلا FIFO على فواتير الطرف الآجلة المفتوحة بعملة الشيك
+   517→      type Target = { invoiceId: number; invoiceRate: Decimal; invoiceCurrencyId: number; invoiceDecimals: number; open: Decimal };
+   518→      const targets: Target[] = [];
+   519→      let settlementRate: string | null = null;
+   520→      let fxGainLoss = dec(0);
+   521→
+   522→      const currencyRow = await db.all<{ decimals: number }>('SELECT decimals FROM currency WHERE id = ?', [
+   523→        c.currencyId,
+   524→      ]);
+   525→      const txDecimals = Number(currencyRow[0]?.decimals ?? 2);
+   526→
+   527→      if (c.refInvoiceId !== null) {
+   528→        const inv = await loadInvoice(db, c.refInvoiceId);
+   529→        if (inv === null) throw new Error('الفاتورة المرجعية غير موجودة — احذف المرجعية أو راجع البيانات');
+   530→        const open = await invoiceOpenAmount(db, c.refInvoiceId);
+   531→        if (open.greaterThan(0)) {
+   532→          if (inv.currencyId === c.currencyId) {
+   533→            targets.push({
+   534→              invoiceId: inv.id,
+   535→              invoiceRate: dec(inv.exchangeRate),
+   536→              invoiceCurrencyId: inv.currencyId,
+   537→              invoiceDecimals: await invoiceDecimals(db, inv.currencyId),
+   538→              open,
+   539→            });
+   540→          } else {
+   541→            // عملة مختلفة: التخصيص بعملة الفاتورة بسعر اليوم + فرق الصرف المحقق
+   542→            const invRateSnap = await getRateSnapshot(inv.currencyId, today);
+   543→            const invRate = dec(invRateSnap.rate);
+   544→            const convRate = txRate.div(invRate); // وحدة عملة الفاتورة لكل وحدة شيك
+   545→            const allocInv = Decimal.min(open, roundTo(amount.times(convRate), 4));
+   546→            settlementRate = money(roundTo(convRate, 6));
+   547→            targets.push({
+   548→              invoiceId: inv.id,
+   549→              invoiceRate: dec(inv.exchangeRate),
+   550→              invoiceCurrencyId: inv.currencyId,
+   551→              invoiceDecimals: await invoiceDecimals(db, inv.currencyId),
+   552→              open: allocInv,
+   553→            });
+   554→            // FR-08-10: القيمة بالأساس اليوم − الدين المُسدّى بسعره الأصلي
+   555→            fxGainLoss = amount.times(txRate).minus(allocInv.times(dec(inv.exchangeRate)));
+   556→          }
+   557→        }
+   558→      } else {
+   559→        // FIFO على فواتير الطرف المفتوحة بعملة الشيك (قرار 8: لا خلط عملات)
+   560→        const partyCol = isCustomer ? 'customer_id' : 'supplier_id';
+   561→        const docType = isCustomer ? 'sale' : 'purchase';
+   562→        const openInvoices = await db.all<{ id: number; currency_id: number; exchange_rate: string | number }>(
+   563→          `SELECT id, currency_id, exchange_rate FROM invoice
+   564→           WHERE ${partyCol} = ? AND doc_type = ? AND status = 'completed'
+   565→             AND pay_status IN ('credit', 'mixed') AND currency_id = ?
+   566→           ORDER BY issued_at ASC, id ASC`,
+   567→          [c.partyId, docType, c.currencyId],
+   568→        );
+   569→        for (const inv of openInvoices) {
+   570→          const open = await invoiceOpenAmount(db, Number(inv.id));
+   571→          if (open.greaterThan(0)) {
+   572→            targets.push({
+   573→              invoiceId: Number(inv.id),
+   574→              invoiceRate: dec(inv.exchange_rate),
+   575→              invoiceCurrencyId: Number(inv.currency_id),
+   576→              invoiceDecimals: txDecimals,
+   577→              open,
+   578→            });
+   579→          }
+   580→        }
+   581→      }
+   582→
+   583→      // ── حركة الصندوق (بعملة الشيك وسعر اليوم) ──
+   584→      const txRes = await db.run(
+   585→        'INSERT INTO cash_tx(tx_type, cashbox_id, currency_id, amount, exchange_rate, settlement_rate, ' +
+   586→          'fx_gain_loss, tx_date, ref_type, ref_id, customer_id, supplier_id, is_voided, description, created_at, created_by) ' +
+   587→          'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)',
+   588→        [
+   589→          txType,
+   590→          opts.cashboxId,
+   591→          c.currencyId,
+   592→          money(amount),
+   593→          money(txRate),
+   594→          settlementRate,
+   595→          money(roundTo(fxGainLoss, 4)),
+   596→          today,
+   597→          c.refInvoiceId !== null ? 'invoice' : 'on_account',
+   598→          c.refInvoiceId,
+   599→          isCustomer ? c.partyId : null,
+   600→          isCustomer ? null : c.partyId,
+   601→          desc,
+   602→          now,
+   603→          getCurrentUserId() ?? null,
+   604→        ],
+   605→      );
+   606→      const cashTxId = Number(txRes.lastInsertRowId);
+   607→
+   608→      // ── التخصيص على الفواتير (بعملة كل فاتورة) ──
+   609→      let remaining = amount;
+   610→      const allocations: Array<{ invoiceId: number; amount: string }> = [];
+   611→      for (const t of targets) {
+   612→        if (remaining.lessThanOrEqualTo(0)) break;
+   613→        const sameCurrency = t.invoiceCurrencyId === c.currencyId;
+   614→        const alloc = sameCurrency ? Decimal.min(remaining, t.open) : t.open;
+   615→        if (alloc.lessThanOrEqualTo(0)) continue;
+   616→        const allocRounded = roundTo(alloc, t.invoiceDecimals);
+   617→        if (allocRounded.lessThanOrEqualTo(0)) continue;
+   618→        await db.run(
+   619→          'INSERT INTO payment_allocation(cash_tx_id, invoice_id, allocated_amount, allocated_at, created_by) VALUES(?, ?, ?, ?, ?)',
+   620→          [cashTxId, t.invoiceId, money(allocRounded), now, getCurrentUserId() ?? null],
+   621→        );
+   622→        if (sameCurrency) remaining = remaining.minus(allocRounded);
+   623→        else remaining = dec(0); // التحويل عبر العملات يستهلك الشيك كله في المسار المرجعي
+   624→        allocations.push({ invoiceId: t.invoiceId, amount: money(allocRounded) });
+   625→      }
+   626→
+   627→      await db.run("UPDATE cheque SET status = 'cleared', cleared_cash_tx_id = ?, updated_at = ? WHERE id = ?", [
+   628→        cashTxId,
+   629→        now,
+   630→        id,
+   631→      ]);
+   632→      await logAudit('cheque_cleared', {
+   633→        entity: 'cheque',
+   634→        entityId: id,
+   635→        details: {
+   636→          chequeNo: c.chequeNo,
+   637→          amount: money(amount),
+   638→          currencyId: c.currencyId,
+   639→          cashTxId,
+   640→          allocations,
+   641→          fxGainLoss: money(roundTo(fxGainLoss, 4)),
+   642→        },
+   643→      });
+   644→      return { cashTxId };
+   645→    });
+   646→  });
+   647→}
+   648→
+   649→async function invoiceDecimals(db: DbEngine, currencyId: number): Promise<number> {
+   650→  const rows = await db.all<{ decimals: number }>('SELECT decimals FROM currency WHERE id = ?', [currencyId]);
+   651→  return Number(rows[0]?.decimals ?? 2);
+   652→}
+   653→
+   654→export interface MarkBouncedOpts {
+   655→  bounceFee?: string;
+   656→  expenseCategoryId?: number;
+   657→  /** مطلوب عند وجود رسم ارتداد (المصروف يخرج من صندوق). */
+   658→  cashboxId?: number;
+   659→}
+   660→
+   661→/**
+   662→ * bounced (FR-14-04): الدين يعود بقائه (لم يُخصم شيئ قبل التحصيل) +
+   663→ * مصروف رسم ارتداد اختياري + قيد تدقيق. مسموح من pending/deposited فقط.
+   664→ */
+   665→export async function markBounced(id: number, opts?: MarkBouncedOpts): Promise<void> {
+   666→  return runSerialized(async () => {
+   667→    const db = await getDb();
+   668→    return db.transaction(async () => {
+   669→      const now = new Date().toISOString();
+   670→      const c = await loadCheque(db, id);
+   671→      assertStatus(c, ['pending', 'deposited'], 'تسجيل ارتداد');
+   672→
+   673→      const fee = dec(opts?.bounceFee ?? '0');
+   674→      let feeTxId: number | null = null;
+   675→      if (fee.greaterThan(0)) {
+   676→        if (opts?.cashboxId === undefined || !Number.isFinite(opts.cashboxId)) {
+   677→          throw new Error('رسم الارتداد يتطلب اختيار صندوق يُخصم منه — اختر الصندوق أو اترك الرسم صفراً');
+   678→        }
+   679→        if (opts.expenseCategoryId === undefined || !Number.isFinite(opts.expenseCategoryId)) {
+   680→          throw new Error('رسم الارتداد يتطلب فئة مصروف — اختر الفئة من قائمة الفئات');
+   681→        }
+   682→        const box = await db.all<{ id: number }>('SELECT id FROM cashbox WHERE id = ?', [opts.cashboxId]);
+   683→        if (box.length === 0) {
+   684→          throw new Error('الصندوق المختار غير موجود — أعد اختيار الصندوق وحاول مجدداً');
+   685→        }
+   686→        const cat = await db.all<{ id: number }>('SELECT id FROM expense_category WHERE id = ?', [
+   687→          opts.expenseCategoryId,
+   688→        ]);
+   689→        if (cat.length === 0) {
+   690→          throw new Error('فئة المصروف غير موجودة — أعد اختيار الفئة');
+   691→        }
+   692→        const rateSnap = await getRateSnapshot(c.currencyId, todayISO());
+   693→        const res = await db.run(
+   694→          'INSERT INTO cash_tx(tx_type, cashbox_id, currency_id, amount, exchange_rate, tx_date, ref_type, ref_id, ' +
+   695→            'expense_category_id, is_voided, description, created_at, created_by) ' +
+   696→            "VALUES('expense', ?, ?, ?, ?, ?, 'cheque', ?, ?, 0, ?, ?, ?)",
+   697→          [
+   698→            opts.cashboxId,
+   699→            c.currencyId,
+   700→            money(fee),
+   701→            rateSnap.rate,
+   702→            todayISO(),
+   703→            id,
+   704→            opts.expenseCategoryId,
+   705→            `رسم ارتداد شيك رقم ${c.chequeNo}`,
+   706→            now,
+   707→            getCurrentUserId() ?? null,
+   708→          ],
+   709→        );
+   710→        feeTxId = Number(res.lastInsertRowId);
+   711→      }
+   712→
+   713→      await db.run('UPDATE cheque SET status = ?, bounced_at = ?, bounce_fee = ?, updated_at = ? WHERE id = ?', [
+   714→        'bounced',
+   715→        now,
+   716→        money(fee),
+   717→        now,
+   718→        id,
+   719→      ]);
+   720→      await logAudit('cheque_bounced', {
+   721→        entity: 'cheque',
+   722→        entityId: id,
+   723→        details: {
+   724→          chequeNo: c.chequeNo,
+   725→          amount: c.amount,
+   726→          bounceFee: money(fee),
+   727→          feeTxId,
+   728→        },
+   729→      });
+   730→    });
+   731→  });
+   732→}
+   733→
+   734→/** void (FR-14-06): مدير فقط + قيد تدقيق (لا حذف فيزيائي). */
+   735→export async function voidCheque(id: number, opts: { managerConfirmed: boolean }): Promise<void> {
+   736→  if (opts.managerConfirmed !== true) {
+   737→    throw new Error('إلغاء الشيك يتطلب تأكيد المدير — فعّل تأكيد المدير ثم أعد المحاولة');
+   738→  }
+   739→  return runSerialized(async () => {
+   740→    const db = await getDb();
+   741→    return db.transaction(async () => {
+   742→      const c = await loadCheque(db, id);
+   743→      assertStatus(c, ['pending', 'deposited'], 'إلغاء');
+   744→      await db.run("UPDATE cheque SET status = 'void', updated_at = ? WHERE id = ?", [
+   745→        new Date().toISOString(),
+   746→        id,
+   747→      ]);
+   748→      await logAudit('cheque_void', {
+   749→        entity: 'cheque',
+   750→        entityId: id,
+   751→        details: { chequeNo: c.chequeNo, amount: c.amount },
+   752→      });
+   753→    });
+   754→  });
+   755→}
+   756→
+   757→/** الشيكات المستحقة خلال N يوماً (للداشبورد — تتضمن المتأخر ما زال معلقاً). */
+   758→export async function dueSoonCheques(days: number): Promise<ChequeRow[]> {
+   759→  const db = await getDb();
+   760→  const d = new Date();
+   761→  d.setDate(d.getDate() + Math.max(0, days));
+   762→  const until = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+   763→  const rows = await db.all<Record<string, unknown>>(
+   764→    `${CHEQUE_LIST_SQL} WHERE c.status IN ('pending', 'deposited') AND c.due_date <= ? ORDER BY c.due_date ASC, c.id ASC LIMIT 100`,
+   765→    [until],
+   766→  );
+   767→  return rows.map(mapChequeRow);
+   768→}
+   769→

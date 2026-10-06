@@ -3,8 +3,9 @@ import { StyleSheet, Text, View } from 'react-native';
 import { BottomSheet, SecondaryButton } from '@/components';
 import { getDb } from '@/db/client';
 import { useToastStore } from '@/store/toast';
-import { common, cash as t } from '@/i18n/ar';
+import { common, cash as t, printing as pr } from '@/i18n/ar';
 import type { CashTxRow } from '@/domain/cash';
+import { printVoucher } from '@/services/doc-print';
 import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
 
 interface VoucherSheetProps {
@@ -36,18 +37,31 @@ function useCompanyName(): string {
 }
 
 /**
- * معاينة نصية للسند المرقّم (FR-04-10): قالب موحّد فوق cash_tx —
- * رقم كبير RVT/PMT + التاريخ + الطرف + المبلغ + سطر التوقيع.
- * الطباعة الفعلية (حراري/PDF) توصلها الموجة 6 — هنا المعاينة النهائية.
+ * معاينة السند المرقّم (FR-04-10) + طباعته الفعلية (الوحدة 10 — الموجة 6-b):
+ * قالب موحّد فوق cash_tx — رقم كبير RVT/PMT + التاريخ + الطرف + المبلغ + سطر التوقيع،
+ * وزر «إرسال للطابعة» يفتح voucherHtml عبر printHtml (الرقم مستهلك مسبقاً من consumeVoucherNo).
  */
 export function VoucherSheet({ visible, onClose, tx, voucherNo }: VoucherSheetProps) {
   const companyName = useCompanyName();
   const toast = useToastStore((st) => st.show);
+  const [printing, setPrinting] = useState(false);
   if (tx === null) return null;
 
   const isReceipt = tx.txType === 'receipt';
   const partyName =
     tx.customerName ?? tx.supplierName ?? tx.expenseCategoryName ?? tx.toCashboxName ?? '—';
+
+  const doPrint = async (): Promise<void> => {
+    if (printing) return;
+    setPrinting(true);
+    try {
+      await printVoucher(tx, voucherNo);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : pr.voucherPrintFailed, { duration: 7000 });
+    } finally {
+      setPrinting(false);
+    }
+  };
 
   return (
     <BottomSheet visible={visible} onClose={onClose} title={isReceipt ? t.voucherReceipt : t.voucherPayment}>
@@ -105,10 +119,9 @@ export function VoucherSheet({ visible, onClose, tx, voucherNo }: VoucherSheetPr
         </View>
 
         <SecondaryButton
-          label={t.sendToPrinter}
-          onPress={() => {
-            toast(t.printerComingSoon);
-          }}
+          label={printing ? pr.printBusy : t.sendToPrinter}
+          onPress={() => void doPrint()}
+          disabled={printing}
         />
       </View>
     </BottomSheet>

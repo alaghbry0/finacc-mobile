@@ -29,14 +29,16 @@ interface StatusChipProps {
   label?: string;
   size?: 'sm' | 'md';
   style?: ViewStyle;
+  /** تلوين مباشر يتجاوز حالة المستند (لاستخدامات غير مستندية مثل حالة الجرد) */
+  tone?: 'success' | 'warning' | 'error' | 'muted';
 }
 
 /**
  * StatusChip (DS-26): شريحة حالة — نقدي أخضر / آجل كهرماني / معلّق رمادي /
  * ملغى أحمر باهت. دائمًا نص + لون + نقطة علامة غير لونية (لا اعتماد على اللون وحده).
  */
-export function StatusChip({ status, label, size = 'sm', style }: StatusChipProps) {
-  const c = STATUS_COLORS[status];
+export function StatusChip({ status, label, size = 'sm', style, tone }: StatusChipProps) {
+  const c = tone !== undefined ? TONE_COLORS[tone] : STATUS_COLORS[status];
   return (
     <View
       style={[
@@ -54,6 +56,13 @@ export function StatusChip({ status, label, size = 'sm', style }: StatusChipProp
     </View>
   );
 }
+
+const TONE_COLORS: Record<'success' | 'warning' | 'error' | 'muted', { bg: string; border: string; fg: string }> = {
+  success: { bg: 'rgba(52, 211, 153, 0.12)', border: 'rgba(52, 211, 153, 0.4)', fg: '#34D399' },
+  warning: { bg: 'rgba(251, 191, 36, 0.12)', border: 'rgba(251, 191, 36, 0.4)', fg: '#FBBF24' },
+  error: { bg: 'rgba(248, 113, 113, 0.12)', border: 'rgba(248, 113, 113, 0.4)', fg: '#F87171' },
+  muted: { bg: 'rgba(100, 116, 139, 0.15)', border: 'rgba(100, 116, 139, 0.4)', fg: '#CBD5E1' },
+};
 
 const s = StyleSheet.create({
   chip: {

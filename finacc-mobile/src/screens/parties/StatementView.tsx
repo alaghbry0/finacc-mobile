@@ -16,9 +16,11 @@ import {
   SelectField,
   type SelectOption,
 } from '@/components';
-import { common, statement as t } from '@/i18n/ar';
+import { common, statement as t, printing as pr } from '@/i18n/ar';
 import { customerStatement, supplierStatement, type StatementLine, type StatementResult } from '@/domain/statements';
 import { getBaseCurrency, listActiveCurrencies, type CurrencyRow } from '@/domain/currency';
+import { printStatement } from '@/services/doc-print';
+import { useToastStore } from '@/store/toast';
 import { dec } from '@/utils/money';
 import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
 
@@ -86,6 +88,9 @@ export function StatementView({ kind, partyId }: StatementViewProps) {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const showToast = useToastStore((s) => s.show);
 
   const load = useCallback(
     async (curId: string, from: string, to: string) => {
@@ -281,10 +286,23 @@ export function StatementView({ kind, partyId }: StatementViewProps) {
             </AppCard>
           )}
 
-          {/* تصدير — الموجة 6 */}
+          {/* تصدير PDF — الوحدة 10 (الموجة 6-b): statementHtml عبر نافذة الطباعة */}
           <View style={s.exportWrap}>
-            <SecondaryButton label={t.exportPdf} disabled onPress={() => undefined} style={s.exportBtn} />
-            <Text style={s.exportHint}>{t.exportPdfHint}</Text>
+            <SecondaryButton
+              label={exporting ? pr.printBusy : t.exportPdf}
+              onPress={() => {
+                if (exporting || data === null) return;
+                setExporting(true);
+                void printStatement(data, kind, { from: dateFrom || undefined, to: dateTo || undefined })
+                  .catch((e: unknown) => {
+                    showToast(e instanceof Error ? e.message : pr.statementPrintFailed, { duration: 7000 });
+                  })
+                  .finally(() => setExporting(false));
+              }}
+              disabled={exporting}
+              style={s.exportBtn}
+            />
+            <Text style={s.exportHint}>{t.exportPdfHintReal}</Text>
           </View>
         </>
       )}

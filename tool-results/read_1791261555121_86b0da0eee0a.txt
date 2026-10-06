@@ -1,0 +1,877 @@
+     1→import { useCallback, useEffect, useRef, useState } from 'react';
+     2→import { router, useLocalSearchParams } from 'expo-router';
+     3→import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+     4→import {
+     5→  AlertTriangle,
+     6→  FileText,
+     7→  Printer,
+     8→  RotateCcw,
+     9→} from 'lucide-react-native';
+    10→import {
+    11→  AmountText,
+    12→  AppCard,
+    13→  BottomSheet,
+    14→  ErrorState,
+    15→  ListRow,
+    16→  LoadingSkeleton,
+    17→  PrimaryButton,
+    18→  Screen,
+    19→  SecondaryButton,
+    20→  SectionTitle,
+    21→  SelectField,
+    22→  StatusChip,
+    23→  type SelectOption,
+    24→} from '@/components';
+    25→import { AmountPadField } from '@/screens/inventory/AmountPadSheet';
+    26→import { CustomerPickerSheet } from '@/screens/sales/CustomerPickerSheet';
+    27→import { DailyRateSheet } from '@/screens/invoices/DailyRateSheet';
+    28→import { VoidInvoiceSheet } from '@/screens/invoices/VoidInvoiceSheet';
+    29→import { common, invoices as t, purchases as p, sales as st } from '@/i18n/ar';
+    30→import {
+    31→  CreditLimitConfirmationRequiredError,
+    32→  getSaleInvoice,
+    33→  listCashboxes,
+    34→  convertDraftToCompleted,
+    35→  voidInvoice,
+    36→  type CashboxLite,
+    37→  type InvoiceFull,
+    38→} from '@/domain/invoicing';
+    39→import { MissingRateError } from '@/domain/currency';
+    40→import { getDb } from '@/db/client';
+    41→import { useToastStore } from '@/store/toast';
+    42→import { dec, money } from '@/utils/money';
+    43→import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
+    44→
+    45→interface LinkedReturnRow {
+    46→  id: number;
+    47→  invoiceNo: string | null;
+    48→  issuedAt: string;
+    49→  total: string;
+    50→  status: string;
+    51→}
+    52→
+    53→/** تفاصيل فاتورة البيع (أو مرتجع بيع مفتوح من نفس المسار): رأس + بنود بالتكلفة والربح + إجماليات + مرتجعات مرتبطة + إجراءات. */
+    54→export default function SaleInvoiceDetailScreen() {
+    55→  const { id } = useLocalSearchParams<{ id: string }>();
+    56→  const invoiceId = Number(Array.isArray(id) ? id[0] : id);
+    57→  const showToast = useToastStore((s) => s.show);
+    58→
+    59→  const [loading, setLoading] = useState(true);
+    60→  const [error, setError] = useState<string | null>(null);
+    61→  const [data, setData] = useState<InvoiceFull | null>(null);
+    62→  const [returns, setReturns] = useState<LinkedReturnRow[]>([]);
+    63→
+    64→  const [printOpen, setPrintOpen] = useState(false);
+    65→  const [voidOpen, setVoidOpen] = useState(false);
+    66→  const [voidBusy, setVoidBusy] = useState(false);
+    67→  const [convertOpen, setConvertOpen] = useState(false);
+    68→
+    69→  // حالة التحويل (مسودة → مكتملة)
+    70→  const [payType, setPayType] = useState<'cash' | 'credit' | 'mixed'>('cash');
+    71→  const [customerId, setCustomerId] = useState<number | null>(null);
+    72→  const [customerName, setCustomerName] = useState<string | null>(null);
+    73→  const [customerSheet, setCustomerSheet] = useState(false);
+    74→  const [cashPart, setCashPart] = useState('');
+    75→  const [cashboxes, setCashboxes] = useState<CashboxLite[]>([]);
+    76→  const [cashboxId, setCashboxId] = useState<string>('');
+    77→  const [convertBusy, setConvertBusy] = useState(false);
+    78→
+    79→  // حواجز الحفظ أثناء التحويل
+    80→  const [rateSheet, setRateSheet] = useState<{ currencyId: number; date: string } | null>(null);
+    81→  const [creditConfirm, setCreditConfirm] = useState<string | null>(null);
+    82→  const retryRef = useRef<(() => Promise<void>) | null>(null);
+    83→
+    84→  const load = useCallback(async () => {
+    85→    setLoading(true);
+    86→    setError(null);
+    87→    try {
+    88→      const full = await getSaleInvoice(invoiceId);
+    89→      if (full === null) {
+    90→        setData(null);
+    91→        setError(t.notFound);
+    92→      } else {
+    93→        setData(full);
+    94→        setCustomerId(full.invoice.customerId);
+    95→        setCustomerName(full.customerName);
+    96→        // المرتجعات المرتبطة — استعلام محلي (getSaleInvoice لا يشملها)
+    97→        const db = await getDb();
+    98→        const rows = await db.all<{ id: number; invoice_no: string | null; issued_at: string; total: string | number; status: string }>(
+    99→          "SELECT id, invoice_no, issued_at, total, status FROM invoice " +
+   100→            "WHERE original_invoice_id = ? AND doc_type = 'sale_return' ORDER BY issued_at DESC, id DESC",
+   101→          [invoiceId],
+   102→        );
+   103→        setReturns(
+   104→          rows.map((r) => ({
+   105→            id: Number(r.id),
+   106→            invoiceNo: r.invoice_no,
+   107→            issuedAt: r.issued_at,
+   108→            total: money(r.total),
+   109→            status: r.status,
+   110→          })),
+   111→        );
+   112→      }
+   113→    } catch (e) {
+   114→      setError(e instanceof Error ? e.message : common.errorGeneral);
+   115→    } finally {
+   116→      setLoading(false);
+   117→    }
+   118→  }, [invoiceId]);
+   119→
+   120→  useEffect(() => {
+   121→    void load();
+   122→  }, [load]);
+   123→
+   124→  // صناديق للتحويل المختلط/النقدي (بعملة الفاتورة — قرار 8)
+   125→  useEffect(() => {
+   126→    if (!convertOpen || data === null) return;
+   127→    let alive = true;
+   128→    void (async () => {
+   129→      try {
+   130→        const boxes = await listCashboxes();
+   131→        if (!alive) return;
+   132→        setCashboxes(boxes);
+   133→        const match = boxes.find((b) => b.currencyId === data.invoice.currencyId);
+   134→        setCashboxId((prev) => {
+   135→          if (prev !== '') return prev;
+   136→          if (data.invoice.cashboxId !== null) return String(data.invoice.cashboxId);
+   137→          return match !== undefined ? String(match.id) : '';
+   138→        });
+   139→      } catch {
+   140→        /* تُعرض رسالة الخطأ عند التحويل */
+   141→      }
+   142→    })();
+   143→    return () => {
+   144→      alive = false;
+   145→    };
+   146→  }, [convertOpen, data]);
+   147→
+   148→  // ---- التحويل (FR-02-18): اختيار الدفع ثم convertDraftToCompleted ----
+   149→  const runConvert = useCallback(
+   150→    async (flags?: { creditLimitConfirmed?: boolean }) => {
+   151→      if (data === null) return;
+   152→      if ((payType === 'credit' || payType === 'mixed') && customerId === null) {
+   153→        showToast(t.convertNeedsCustomer);
+   154→        setCustomerSheet(true);
+   155→        return;
+   156→      }
+   157→      if (payType === 'mixed' && dec(cashPart === '' ? '0' : cashPart).lessThanOrEqualTo(0)) {
+   158→        showToast(t.convertNeedsCashPart);
+   159→        return;
+   160→      }
+   161→      if ((payType === 'cash' || payType === 'mixed') && cashboxId === '') {
+   162→        showToast(t.convertNeedsCashbox);
+   163→        return;
+   164→      }
+   165→      setConvertBusy(true);
+   166→      try {
+   167→        const res = await convertDraftToCompleted(invoiceId, {
+   168→          payType,
+   169→          cashPart: payType === 'mixed' ? cashPart : undefined,
+   170→          customerId,
+   171→          cashboxId: payType === 'credit' ? null : Number(cashboxId),
+   172→          creditLimitConfirmed: flags?.creditLimitConfirmed,
+   173→        });
+   174→        setConvertOpen(false);
+   175→        showToast(t.convertSuccess(res.invoiceNo ?? ''));
+   176→        await load();
+   177→      } catch (e) {
+   178→        if (e instanceof MissingRateError) {
+   179→          setRateSheet({ currencyId: e.currencyId, date: e.date });
+   180→          retryRef.current = () => runConvert(flags);
+   181→          return;
+   182→        }
+   183→        if (e instanceof CreditLimitConfirmationRequiredError) {
+   184→          setCreditConfirm(e.message);
+   185→          return;
+   186→        }
+   187→        showToast(e instanceof Error ? e.message : common.errorGeneral);
+   188→      } finally {
+   189→        setConvertBusy(false);
+   190→      }
+   191→    },
+   192→    [data, payType, customerId, cashPart, cashboxId, invoiceId, load, showToast],
+   193→  );
+   194→
+   195→  // ---- الإلغاء (FR-02-15) ----
+   196→  const doVoid = useCallback(
+   197→    async (reason: string) => {
+   198→      setVoidBusy(true);
+   199→      try {
+   200→        await voidInvoice(invoiceId, { managerConfirmed: true, reason });
+   201→        setVoidOpen(false);
+   202→        showToast(t.voidSuccess);
+   203→        await load();
+   204→      } catch (e) {
+   205→        // رسالة الخطأ تُعرض كما هي (مثل وجود مرتجعات مكتملة)
+   206→        showToast(e instanceof Error ? e.message : common.errorGeneral, { duration: 7000 });
+   207→      } finally {
+   208→        setVoidBusy(false);
+   209→      }
+   210→    },
+   211→    [invoiceId, load, showToast],
+   212→  );
+   213→
+   214→  if (loading) {
+   215→    return (
+   216→      <Screen title={st.newTitle} onBack={() => router.back()}>
+   217→        <LoadingSkeleton variant="card" />
+   218→        <LoadingSkeleton rows={3} />
+   219→      </Screen>
+   220→    );
+   221→  }
+   222→
+   223→  if (error !== null || data === null) {
+   224→    return (
+   225→      <Screen title={st.newTitle} onBack={() => router.back()}>
+   226→        <ErrorState message={error ?? t.notFound} onRetry={() => void load()} />
+   227→      </Screen>
+   228→    );
+   229→  }
+   230→
+   231→  const inv = data.invoice;
+   232→  const isReturnDoc = inv.docType === 'sale_return';
+   233→  const isDraft = inv.status === 'draft';
+   234→  const isVoid = inv.status === 'void';
+   235→  const decimals = data.currencyDecimals;
+   236→  const code = data.currencyCode;
+   237→  const cashboxOptions: SelectOption[] = cashboxes
+   238→    .filter((b) => b.currencyId === inv.currencyId)
+   239→    .map((b) => ({ value: String(b.id), label: b.name }));
+   240→
+   241→  return (
+   242→    <Screen
+   243→      title={isReturnDoc ? t.saleReturnTitle : st.newTitle}
+   244→      onBack={() => router.back()}
+   245→      footer={
+   246→        <View style={s.footerWrap}>
+   247→          {isDraft && !isReturnDoc ? (
+   248→            <PrimaryButton label={t.convertAction} onPress={() => setConvertOpen(true)} />
+   249→          ) : null}
+   250→          {!isVoid && !isDraft && !isReturnDoc ? (
+   251→            <SecondaryButton
+   252→              label={t.saleReturnTitle}
+   253→              onPress={() => router.push(`/sales/${invoiceId}/return`)}
+   254→            />
+   255→          ) : null}
+   256→          {!isVoid && !isReturnDoc ? (
+   257→            <SecondaryButton label={t.voidTitle} onPress={() => setVoidOpen(true)} />
+   258→          ) : null}
+   259→          {isReturnDoc && inv.originalInvoiceId !== null ? (
+   260→            <SecondaryButton
+   261→              label={t.viewOriginal}
+   262→              onPress={() => router.push(`/sales/${inv.originalInvoiceId}`)}
+   263→            />
+   264→          ) : null}
+   265→          <SecondaryButton label={t.printAction} onPress={() => setPrintOpen(true)} />
+   266→        </View>
+   267→      }
+   268→    >
+   269→      {/* أشرطة الحالة */}
+   270→      {isVoid ? (
+   271→        <View style={s.voidBanner}>
+   272→          <AlertTriangle size={20} color={colors.error} />
+   273→          <Text style={s.voidBannerText}>{t.voidBanner}</Text>
+   274→        </View>
+   275→      ) : null}
+   276→      {isDraft ? (
+   277→        <View style={s.draftBanner}>
+   278→          <FileText size={20} color={colors.warning} />
+   279→          <Text style={s.draftBannerText}>{t.draftBanner}</Text>
+   280→        </View>
+   281→      ) : null}
+   282→
+   283→      {/* رأس الفاتورة */}
+   284→      <AppCard>
+   285→        <View style={s.headRow}>
+   286→          <Text style={s.docNo} numberOfLines={1} adjustsFontSizeToFit>
+   287→            {inv.invoiceNo ?? st.draftTag}
+   288→          </Text>
+   289→          <View style={s.headChips}>
+   290→            <StatusChip
+   291→              status={inv.status === 'completed' ? 'active' : (inv.status as 'draft' | 'void')}
+   292→              label={inv.status === 'completed' ? st.statusCompleted : inv.status === 'draft' ? st.draftTag : st.voidTag}
+   293→            />
+   294→            <StatusChip status={inv.payStatus as 'cash' | 'credit' | 'mixed'} />
+   295→          </View>
+   296→        </View>
+   297→        <View style={s.metaGrid}>
+   298→          <MetaRow label={t.issueDate} value={common.formatDate(inv.issuedAt)} />
+   299→          <MetaRow label={t.customerLabel} value={data.customerName ?? t.cashCustomer} />
+   300→          <MetaRow label={st.cashboxChip} value={data.cashboxName ?? '—'} />
+   301→          <MetaRow label={t.currencyLabel} value={`${data.currencyName} (${code})`} />
+   302→          <MetaRow label={t.exchangeRateLabel} value={formatRate(inv.exchangeRate)} mono />
+   303→        </View>
+   304→        {inv.rateIsFallback ? (
+   305→          <View style={s.fallbackBadge}>
+   306→            <AlertTriangle size={14} color={colors.warning} />
+   307→            <Text style={s.fallbackBadgeText}>{t.rateFallbackBadge}</Text>
+   308→          </View>
+   309→        ) : null}
+   310→        {inv.notesPrinted !== null && inv.notesPrinted.length > 0 ? (
+   311→          <Text style={s.note}>{inv.notesPrinted}</Text>
+   312→        ) : null}
+   313→      </AppCard>
+   314→
+   315→      {/* جدول البنود (تكلفة/ربح — للمدير) */}
+   316→      <SectionTitle title={t.itemsHeader} hint={t.profitNote} />
+   317→      <AppCard flush>
+   318→        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.tableWrap}>
+   319→          <View>
+   320→            <View style={s.tableHead}>
+   321→              <Text style={[s.th, s.cName]}>{t.colProduct}</Text>
+   322→              <Text style={s.th}>{t.colQty}</Text>
+   323→              <Text style={s.th}>{t.colPrice}</Text>
+   324→              <Text style={s.th}>{t.colDiscount}</Text>
+   325→              <Text style={s.th}>{t.colTotal}</Text>
+   326→              <Text style={s.th}>{t.colCost}</Text>
+   327→              <Text style={s.th}>{t.colProfit}</Text>
+   328→            </View>
+   329→            {data.items.map((it) => {
+   330→              const profit = dec(it.lineTotal).minus(dec(it.lineCost));
+   331→              return (
+   332→                <View key={it.id} style={s.tr}>
+   333→                  <View style={[s.tdNameWrap, s.cName]}>
+   334→                    <Text style={s.tdName} numberOfLines={2}>
+   335→                      {it.productName ?? it.lineDesc ?? '—'}
+   336→                    </Text>
+   337→                    {it.productId === null ? (
+   338→                      <Text style={s.tdService}>{t.serviceItem}</Text>
+   339→                    ) : null}
+   340→                  </View>
+   341→                  <Text style={s.td}>{formatQty(it.qty)}</Text>
+   342→                  <Text style={s.td}>{shortMoney(it.unitPrice, decimals)}</Text>
+   343→                  <Text style={s.td}>
+   344→                    {dec(it.discountPercent).greaterThan(0) ? `${formatQty(it.discountPercent)}%` : '—'}
+   345→                  </Text>
+   346→                  <Text style={[s.td, s.tdStrong]}>{shortMoney(it.lineTotal, decimals)}</Text>
+   347→                  <Text style={s.td}>{shortMoney(it.lineCost, decimals)}</Text>
+   348→                  <Text style={[s.td, profit.isNegative() ? s.tdLoss : s.tdProfit]}>
+   349→                    {shortMoney(profit, decimals)}
+   350→                  </Text>
+   351→                </View>
+   352→              );
+   353→            })}
+   354→            <View style={[s.tr, s.trTotal]}>
+   355→              <Text style={[s.tdName, s.cName]}>{t.profitInvoice}</Text>
+   356→              <Text style={s.td}>{formatQty(data.items.reduce((acc, it) => acc.plus(dec(it.qty)), dec(0)).toString())}</Text>
+   357→              <Text style={s.td}>—</Text>
+   358→              <Text style={s.td}>—</Text>
+   359→              <Text style={[s.td, s.tdStrong]}>{shortMoney(inv.total, decimals)}</Text>
+   360→              <Text style={s.td}>{shortMoney(inv.costTotal, decimals)}</Text>
+   361→              <Text
+   362→                style={[
+   363→                  s.td,
+   364→                  dec(inv.total).minus(dec(inv.costTotal)).isNegative() ? s.tdLoss : s.tdProfit,
+   365→                ]}
+   366→              >
+   367→                {shortMoney(dec(inv.total).minus(dec(inv.costTotal)), decimals)}
+   368→              </Text>
+   369→            </View>
+   370→          </View>
+   371→        </ScrollView>
+   372→      </AppCard>
+   373→
+   374→      {/* الإجماليات */}
+   375→      <SectionTitle title={t.totalsHeader} />
+   376→      <AppCard style={s.totalsCard}>
+   377→        <TotalRow label={t.subtotalLabel} value={inv.subtotal} decimals={decimals} />
+   378→        <TotalRow label={t.discountLabel} value={inv.discountAmount} decimals={decimals} sign="minus" />
+   379→        <TotalRow label={t.taxLabel} value={inv.taxAmount} decimals={decimals} sign="plus" />
+   380→        <View style={s.grandRow}>
+   381→          <Text style={s.grandLabel}>{t.totalLabel}</Text>
+   382→          <AmountText value={inv.total} decimals={decimals} suffix={code} size={fontSizes.display} />
+   383→        </View>
+   384→        <TotalRow label={t.paidLabel} value={inv.paidAmount} decimals={decimals} />
+   385→        <TotalRow
+   386→          label={t.dueLabel}
+   387→          value={inv.dueAmount}
+   388→          decimals={decimals}
+   389→          color={dec(inv.dueAmount).greaterThan(0) ? colors.warning : undefined}
+   390→        />
+   391→      </AppCard>
+   392→
+   393→      {/* المرتجعات المرتبطة */}
+   394→      <SectionTitle title={t.linkedReturnsTitle} />
+   395→      {returns.length === 0 ? (
+   396→        <Text style={s.noReturns}>{t.noLinkedReturns}</Text>
+   397→      ) : (
+   398→        <AppCard style={s.listCard}>
+   399→          {returns.map((r, i) => (
+   400→            <ListRow
+   401→              key={r.id}
+   402→              title={r.invoiceNo ?? st.draftTag}
+   403→              subtitle={common.formatDate(r.issuedAt)}
+   404→              leading={<RotateCcw size={20} color={colors.accent} />}
+   405→              trailing={
+   406→                <View style={s.trailing}>
+   407→                  <AmountText value={r.total} decimals={decimals} suffix={code} size={fontSizes.body} />
+   408→                  <StatusChip
+   409→                    status={r.status === 'completed' ? 'active' : (r.status as 'draft' | 'void')}
+   410→                    label={r.status === 'completed' ? st.statusCompleted : r.status === 'draft' ? st.draftTag : st.voidTag}
+   411→                  />
+   412→                </View>
+   413→              }
+   414→              onPress={() => router.push(`/sales/${r.id}`)}
+   415→              last={i === returns.length - 1}
+   416→            />
+   417→          ))}
+   418→        </AppCard>
+   419→      )}
+   420→
+   421→      <View style={s.bottomSpace} />
+   422→
+   423→      {/* ============ الشيتات ============ */}
+   424→
+   425→      {/* الطباعة/المشاركة — قوالب الموجة 6 */}
+   426→      <BottomSheet visible={printOpen} onClose={() => setPrintOpen(false)} title={t.printSheetTitle}>
+   427→        <View style={s.sheetBody}>
+   428→          <View style={s.printIcon}>
+   429→            <Printer size={38} color={colors.muted} />
+   430→          </View>
+   431→          <Text style={s.sheetMessage}>{t.printComingSoon}</Text>
+   432→          <PrimaryButton label={t.printAction} disabled onPress={() => undefined} />
+   433→          <SecondaryButton label={common.close} onPress={() => setPrintOpen(false)} />
+   434→        </View>
+   435→      </BottomSheet>
+   436→
+   437→      {/* إلغاء الفاتورة */}
+   438→      <VoidInvoiceSheet
+   439→        visible={voidOpen}
+   440→        onClose={() => setVoidOpen(false)}
+   441→        docNo={inv.invoiceNo ?? st.draftTag}
+   442→        busy={voidBusy}
+   443→        onVoid={(reason) => void doVoid(reason)}
+   444→      />
+   445→
+   446→      {/* تحويل المسودة إلى مكتملة */}
+   447→      <BottomSheet
+   448→        visible={convertOpen}
+   449→        onClose={() => setConvertOpen(false)}
+   450→        title={t.convertSheetTitle}
+   451→        dismissible={!convertBusy}
+   452→      >
+   453→        <View style={s.sheetBody}>
+   454→          <Text style={s.sheetMessage}>{t.convertHint}</Text>
+   455→          <View style={s.segment}>
+   456→            <SegBtn active={payType === 'cash'} label={common.statuses.cash} onPress={() => setPayType('cash')} />
+   457→            <SegBtn active={payType === 'credit'} label={common.statuses.credit} onPress={() => setPayType('credit')} />
+   458→            <SegBtn active={payType === 'mixed'} label={common.statuses.mixed} onPress={() => setPayType('mixed')} />
+   459→          </View>
+   460→          {payType !== 'cash' ? (
+   461→            <Pressable
+   462→              accessibilityRole="button"
+   463→              accessibilityLabel={t.customerLabel}
+   464→              onPress={() => setCustomerSheet(true)}
+   465→              style={({ pressed }) => [s.customerRow, pressed && s.pressed]}
+   466→            >
+   467→              <Text style={s.customerRowLabel}>{t.customerLabel}</Text>
+   468→              <Text style={[s.customerRowValue, customerId === null && s.customerRowEmpty]}>
+   469→                {customerName ?? t.cashCustomer}
+   470→              </Text>
+   471→            </Pressable>
+   472→          ) : null}
+   473→          {payType !== 'credit' ? (
+   474→            <SelectField
+   475→              label={st.cashboxChip}
+   476→              value={cashboxId}
+   477→              options={cashboxOptions}
+   478→              onSelect={setCashboxId}
+   479→              required
+   480→            />
+   481→          ) : null}
+   482→          {payType === 'mixed' ? (
+   483→            <AmountPadField
+   484→              label={p.cashPartLabel}
+   485→              value={cashPart}
+   486→              onValue={setCashPart}
+   487→              suffix={code}
+   488→              required
+   489→            />
+   490→          ) : null}
+   491→          <PrimaryButton
+   492→            label={t.convertAction}
+   493→            loading={convertBusy}
+   494→            disabled={convertBusy}
+   495→            onPress={() => void runConvert()}
+   496→          />
+   497→        </View>
+   498→      </BottomSheet>
+   499→
+   500→      <CustomerPickerSheet
+   501→        visible={customerSheet}
+   502→        onClose={() => setCustomerSheet(false)}
+   503→        onPick={(picked) => {
+   504→          setCustomerId(picked?.id ?? null);
+   505→          setCustomerName(picked?.name ?? null);
+   506→        }}
+   507→      />
+   508→
+   509→      {/* سعر الصرف المفقود أثناء التحويل */}
+   510→      <DailyRateSheet
+   511→        visible={rateSheet !== null}
+   512→        onClose={() => setRateSheet(null)}
+   513→        currencyId={rateSheet?.currencyId ?? 0}
+   514→        date={rateSheet?.date ?? ''}
+   515→        currencyCode={code}
+   516→        onSaved={() => {
+   517→          setRateSheet(null);
+   518→          const retry = retryRef.current;
+   519→          retryRef.current = null;
+   520→          if (retry !== null) void retry();
+   521→        }}
+   522→      />
+   523→
+   524→      {/* تأكيد تجاوز حد الائتمان أثناء التحويل */}
+   525→      <BottomSheet visible={creditConfirm !== null} onClose={() => setCreditConfirm(null)} title={st.creditLimitTitle}>
+   526→        <View style={s.sheetBody}>
+   527→          <Text style={s.sheetMessage}>{creditConfirm ?? ''}</Text>
+   528→          <PrimaryButton
+   529→            label={st.continueAnyway}
+   530→            onPress={() => {
+   531→              setCreditConfirm(null);
+   532→              void runConvert({ creditLimitConfirmed: true });
+   533→            }}
+   534→          />
+   535→          <SecondaryButton label={common.cancel} onPress={() => setCreditConfirm(null)} />
+   536→        </View>
+   537→      </BottomSheet>
+   538→    </Screen>
+   539→  );
+   540→}
+   541→
+   542→// ============ مكونات محلية ============
+   543→
+   544→function MetaRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+   545→  return (
+   546→    <View style={s.metaRow}>
+   547→      <Text style={s.metaLabel}>{label}</Text>
+   548→      <Text style={[s.metaValue, mono === true && s.metaValueMono]} numberOfLines={1}>
+   549→        {value}
+   550→      </Text>
+   551→    </View>
+   552→  );
+   553→}
+   554→
+   555→function TotalRow({
+   556→  label,
+   557→  value,
+   558→  decimals,
+   559→  sign,
+   560→  color,
+   561→}: {
+   562→  label: string;
+   563→  value: string;
+   564→  decimals: number;
+   565→  sign?: 'minus' | 'plus';
+   566→  color?: string;
+   567→}) {
+   568→  return (
+   569→    <View style={s.totalRow}>
+   570→      <Text style={s.totalLabel}>{label}</Text>
+   571→      <Text
+   572→        style={[
+   573→          s.totalValue,
+   574→          sign === 'minus' && { color: colors.warning },
+   575→          sign === 'plus' && { color: colors.success },
+   576→          color !== undefined && { color },
+   577→        ]}
+   578→      >
+   579→        {sign === 'minus' ? '− ' : sign === 'plus' ? '+ ' : ''}
+   580→        {formatMoneySafe(value, decimals)}
+   581→      </Text>
+   582→    </View>
+   583→  );
+   584→}
+   585→
+   586→function SegBtn({ active, label, onPress }: { active: boolean; label: string; onPress: () => void }) {
+   587→  return (
+   588→    <Text
+   589→      accessibilityRole="button"
+   590→      accessibilityState={{ selected: active }}
+   591→      onPress={onPress}
+   592→      style={[s.segBtn, active && s.segBtnActive]}
+   593→    >
+   594→      {label}
+   595→    </Text>
+   596→  );
+   597→}
+   598→
+   599→// ============ مساعدات ============
+   600→
+   601→function formatRate(rate: string): string {
+   602→  const d = dec(rate);
+   603→  return d.toFixed(d.decimalPlaces() > 2 ? 4 : 2).replace(/0+$/, '').replace(/\.$/, '');
+   604→}
+   605→
+   606→function formatQty(v: string): string {
+   607→  const d = dec(v);
+   608→  return d.isInteger() ? d.toFixed(0) : d.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+   609→}
+   610→function shortMoney(v: string | import('decimal.js').Decimal, decimals: number): string {
+   611→  const d = dec(typeof v === 'string' ? v : v.toString());
+   612→  return d.toFixed(decimals > 2 ? 2 : decimals).replace(/\.00$/, '');
+   613→}
+   614→function formatMoneySafe(v: string, decimals: number): string {
+   615→  return dec(v).toFixed(decimals > 2 ? 2 : decimals);
+   616→}
+   617→
+   618→const s = StyleSheet.create({
+   619→  // أشرطة الحالة
+   620→  voidBanner: {
+   621→    flexDirection: 'row',
+   622→    alignItems: 'center',
+   623→    gap: spacing.sm,
+   624→    padding: spacing.md,
+   625→    backgroundColor: colors.extra.errorSoft,
+   626→    borderWidth: 1,
+   627→    borderColor: 'rgba(248, 113, 113, 0.35)',
+   628→    borderRadius: radii.md,
+   629→    marginBottom: spacing.md,
+   630→  },
+   631→  voidBannerText: {
+   632→    flex: 1,
+   633→    fontFamily: fonts.bodyBold,
+   634→    fontSize: fontSizes.caption,
+   635→    color: colors.error,
+   636→  },
+   637→  draftBanner: {
+   638→    flexDirection: 'row',
+   639→    alignItems: 'center',
+   640→    gap: spacing.sm,
+   641→    padding: spacing.md,
+   642→    backgroundColor: colors.extra.warningSoft,
+   643→    borderWidth: 1,
+   644→    borderColor: 'rgba(251, 191, 36, 0.35)',
+   645→    borderRadius: radii.md,
+   646→    marginBottom: spacing.md,
+   647→  },
+   648→  draftBannerText: {
+   649→    flex: 1,
+   650→    fontFamily: fonts.bodyBold,
+   651→    fontSize: fontSizes.caption,
+   652→    color: colors.warning,
+   653→  },
+   654→
+   655→  // رأس الفاتورة
+   656→  headRow: {
+   657→    flexDirection: 'row',
+   658→    alignItems: 'center',
+   659→    justifyContent: 'space-between',
+   660→    gap: spacing.sm,
+   661→    marginBottom: spacing.sm,
+   662→  },
+   663→  docNo: {
+   664→    flex: 1,
+   665→    fontFamily: fonts.numeric,
+   666→    fontVariant: ['tabular-nums'],
+   667→    fontSize: fontSizes.title,
+   668→    fontWeight: '700',
+   669→    color: colors.textPrimary,
+   670→    direction: 'ltr',
+   671→    textAlign: 'left',
+   672→    includeFontPadding: false,
+   673→  },
+   674→  headChips: { flexDirection: 'row', gap: 6, alignItems: 'center' },
+   675→  metaGrid: { gap: 4 },
+   676→  metaRow: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.md },
+   677→  metaLabel: {
+   678→    fontFamily: fonts.body,
+   679→    fontSize: fontSizes.caption,
+   680→    color: colors.textSecondary,
+   681→  },
+   682→  metaValue: {
+   683→    flexShrink: 1,
+   684→    fontFamily: fonts.bodyMedium,
+   685→    fontSize: fontSizes.caption,
+   686→    color: colors.textPrimary,
+   687→    textAlign: 'left',
+   688→  },
+   689→  metaValueMono: { fontFamily: fonts.numeric, fontVariant: ['tabular-nums'] },
+   690→  fallbackBadge: {
+   691→    flexDirection: 'row',
+   692→    alignItems: 'center',
+   693→    alignSelf: 'flex-start',
+   694→    gap: 5,
+   695→    marginTop: spacing.sm,
+   696→    paddingHorizontal: spacing.sm,
+   697→    paddingVertical: 3,
+   698→    borderRadius: radii.pill,
+   699→    backgroundColor: colors.extra.warningSoft,
+   700→    borderWidth: 1,
+   701→    borderColor: 'rgba(251, 191, 36, 0.35)',
+   702→  },
+   703→  fallbackBadgeText: {
+   704→    fontFamily: fonts.bodyMedium,
+   705→    fontSize: fontSizes.micro,
+   706→    color: colors.warning,
+   707→  },
+   708→  note: {
+   709→    marginTop: spacing.sm,
+   710→    fontFamily: fonts.body,
+   711→    fontSize: fontSizes.caption,
+   712→    color: colors.textSecondary,
+   713→    lineHeight: 19,
+   714→  },
+   715→
+   716→  // جدول البنود
+   717→  tableWrap: { paddingHorizontal: spacing.sm, paddingVertical: spacing.sm },
+   718→  tableHead: {
+   719→    flexDirection: 'row',
+   720→    borderBottomWidth: 1,
+   721→    borderBottomColor: colors.border,
+   722→    paddingBottom: 6,
+   723→    gap: 8,
+   724→  },
+   725→  tr: {
+   726→    flexDirection: 'row',
+   727→    alignItems: 'center',
+   728→    gap: 8,
+   729→    paddingVertical: 8,
+   730→    borderBottomWidth: 1,
+   731→    borderBottomColor: 'rgba(51, 65, 85, 0.5)',
+   732→  },
+   733→  trTotal: { borderBottomWidth: 0, backgroundColor: colors.extra.accentSoft, borderRadius: radii.sm, paddingHorizontal: 6 },
+   734→  th: {
+   735→    width: 72,
+   736→    fontFamily: fonts.bodyMedium,
+   737→    fontSize: fontSizes.micro,
+   738→    color: colors.textSecondary,
+   739→    textAlign: 'center',
+   740→  },
+   741→  td: {
+   742→    width: 72,
+   743→    fontFamily: fonts.numeric,
+   744→    fontVariant: ['tabular-nums'],
+   745→    fontSize: fontSizes.caption,
+   746→    color: colors.textPrimary,
+   747→    textAlign: 'center',
+   748→    includeFontPadding: false,
+   749→  },
+   750→  cName: { width: 150, textAlign: 'right' },
+   751→  tdNameWrap: { width: 150, gap: 1 },
+   752→  tdName: {
+   753→    fontFamily: fonts.bodyMedium,
+   754→    fontSize: fontSizes.caption,
+   755→    color: colors.textPrimary,
+   756→  },
+   757→  tdService: {
+   758→    fontFamily: fonts.body,
+   759→    fontSize: fontSizes.micro,
+   760→    color: colors.muted,
+   761→  },
+   762→  tdStrong: { fontWeight: '700' },
+   763→  tdProfit: { color: colors.success },
+   764→  tdLoss: { color: colors.error },
+   765→
+   766→  // الإجماليات
+   767→  totalsCard: { gap: 6 },
+   768→  totalRow: { flexDirection: 'row', justifyContent: 'space-between' },
+   769→  totalLabel: {
+   770→    fontFamily: fonts.body,
+   771→    fontSize: fontSizes.caption,
+   772→    color: colors.textSecondary,
+   773→  },
+   774→  totalValue: {
+   775→    fontFamily: fonts.numeric,
+   776→    fontVariant: ['tabular-nums'],
+   777→    fontSize: fontSizes.caption,
+   778→    color: colors.textPrimary,
+   779→    includeFontPadding: false,
+   780→  },
+   781→  grandRow: {
+   782→    flexDirection: 'row',
+   783→    justifyContent: 'space-between',
+   784→    alignItems: 'center',
+   785→    borderTopWidth: 1,
+   786→    borderTopColor: colors.border,
+   787→    paddingTop: spacing.sm,
+   788→    marginTop: spacing.xs,
+   789→    marginBottom: spacing.xs,
+   790→  },
+   791→  grandLabel: {
+   792→    fontFamily: fonts.bodyBold,
+   793→    fontSize: fontSizes.body,
+   794→    color: colors.textPrimary,
+   795→  },
+   796→  dueHint: {
+   797→    fontFamily: fonts.body,
+   798→    fontSize: fontSizes.micro,
+   799→    color: colors.muted,
+   800→    textAlign: 'left',
+   801→  },
+   802→
+   803→  // المرتجعات
+   804→  noReturns: {
+   805→    fontFamily: fonts.body,
+   806→    fontSize: fontSizes.caption,
+   807→    color: colors.muted,
+   808→    paddingVertical: spacing.md,
+   809→  },
+   810→  listCard: { paddingVertical: spacing.xs },
+   811→  trailing: { alignItems: 'flex-end', gap: 6 },
+   812→  bottomSpace: { height: spacing.lg },
+   813→
+   814→  // التذييل
+   815→  footerWrap: { gap: spacing.sm },
+   816→
+   817→  // الشيتات
+   818→  sheetBody: {
+   819→    paddingHorizontal: spacing.lg,
+   820→    paddingBottom: spacing.lg,
+   821→    gap: spacing.md,
+   822→  },
+   823→  sheetMessage: {
+   824→    fontFamily: fonts.body,
+   825→    fontSize: fontSizes.body,
+   826→    color: colors.textSecondary,
+   827→    textAlign: 'center',
+   828→    lineHeight: 22,
+   829→  },
+   830→  printIcon: { alignSelf: 'center', padding: spacing.md },
+   831→  segment: { flexDirection: 'row', gap: spacing.sm },
+   832→  segBtn: {
+   833→    flex: 1,
+   834→    minHeight: 48,
+   835→    textAlign: 'center',
+   836→    textAlignVertical: 'center',
+   837→    borderRadius: radii.md,
+   838→    borderWidth: 1.5,
+   839→    borderColor: colors.border,
+   840→    backgroundColor: colors.card,
+   841→    color: colors.textSecondary,
+   842→    fontFamily: fonts.bodyMedium,
+   843→    fontSize: fontSizes.body,
+   844→    overflow: 'hidden',
+   845→    paddingTop: 13,
+   846→  },
+   847→  segBtnActive: {
+   848→    borderColor: colors.accent,
+   849→    backgroundColor: colors.extra.accentSoft,
+   850→    color: colors.accent,
+   851→    fontFamily: fonts.bodyBold,
+   852→  },
+   853→  customerRow: {
+   854→    flexDirection: 'row',
+   855→    alignItems: 'center',
+   856→    justifyContent: 'space-between',
+   857→    minHeight: 48,
+   858→    backgroundColor: colors.card,
+   859→    borderWidth: 1.5,
+   860→    borderColor: colors.border,
+   861→    borderRadius: radii.md,
+   862→    paddingHorizontal: spacing.md,
+   863→  },
+   864→  customerRowLabel: {
+   865→    fontFamily: fonts.bodyMedium,
+   866→    fontSize: fontSizes.caption,
+   867→    color: colors.textSecondary,
+   868→  },
+   869→  customerRowValue: {
+   870→    fontFamily: fonts.bodyBold,
+   871→    fontSize: fontSizes.body,
+   872→    color: colors.textPrimary,
+   873→  },
+   874→  customerRowEmpty: { color: colors.muted, fontFamily: fonts.bodyMedium },
+   875→  pressed: { opacity: 0.85 },
+   876→});
+   877→

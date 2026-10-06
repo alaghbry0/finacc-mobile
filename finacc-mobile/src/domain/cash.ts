@@ -1135,6 +1135,39 @@ export async function shiftExpected(cashboxId: number, openedAt: string): Promis
 }
 
 /**
+ * ملخص وارد/صادر نافذة وردية بنطاق صريح (حتى تاريخ الإقفال) — لتقرير طباعة
+ * الوردية بعد إقفالها (الوحدة 10): نفس معادلة القرار 9 لكن بنهاية النافذة
+ * الأصلية لا «اليوم». يعيد عملة الصندوق أيضاً لتنسيق التقرير.
+ */
+export async function shiftWindowSummary(
+  cashboxId: number,
+  dateFrom: string,
+  dateTo: string,
+): Promise<{
+  expectedIn: string;
+  expectedOut: string;
+  expected: string;
+  currencyCode: string;
+  currencyDecimals: number;
+}> {
+  const db = await getDb();
+  const [flows, box] = await Promise.all([
+    sumBoxFlows(db, cashboxId, { dateFrom, dateTo }),
+    db.all<{ code: string; decimals: number }>(
+      'SELECT c.code, c.decimals FROM cashbox b JOIN currency c ON c.id = b.currency_id WHERE b.id = ?',
+      [cashboxId],
+    ),
+  ]);
+  return {
+    expectedIn: money(flows.in),
+    expectedOut: money(flows.out),
+    expected: money(flows.in.minus(flows.out)),
+    currencyCode: box.length > 0 ? String(box[0].code) : '',
+    currencyDecimals: box.length > 0 ? Number(box[0].decimals) : 2,
+  };
+}
+
+/**
  * إقفال الوردية: يسجل المتوقع (وارد − صادر خلال النافذة) والعد الفعلي والفرق
  * (الفرق = العد الفعلي − [الرصيد الافتتاحي + المتوقع] — العد يشمل الدرج كاملاً)
  * + قيد تدقيق. يعيد { expected, difference }.

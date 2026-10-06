@@ -18,6 +18,9 @@ const MIGRATIONS: MigrationFile[] = [migration0001];
 
 const MIGRATIONS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT);`;
 
+/** أعلى إصدار مخطط يعرفه هذا التطبيق — يُقارن به عند استعادة النسخ (FR-11-02). */
+export const SCHEMA_VERSION = MIGRATIONS.reduce((max, m) => Math.max(max, m.version), 0);
+
 export async function runMigrations(engine: DbEngine): Promise<void> {
   await engine.exec(MIGRATIONS_TABLE_DDL);
   const applied = await engine.all<{ version: number }>('SELECT version FROM _migrations');

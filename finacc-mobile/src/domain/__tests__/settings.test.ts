@@ -12,7 +12,7 @@ import {
 } from '@/domain/settings';
 
 /**
- * اختبارات سجل الإعدادات (الملحق هـ — 17 مفتاحاً):
+ * اختبارات سجل الإعدادات (الملحق هـ — 17 مفتاحاً + 3 مفاتيح طباعة FR-13-03 أضيفت في الموجة 6-b):
  * الزرع idempotent، نطاق zod لكل مفتاح، القراءة بلا كتابة، الرفض برسائل عربية.
  */
 
@@ -25,10 +25,10 @@ afterAll(() => {
 });
 
 describe('settings: السجل نفسه', () => {
-  test('17 مفتاحاً حرفياً كما في الملحق هـ', () => {
-    expect(SETTINGS_COUNT).toBe(17);
-    expect(listSettingKeys()).toHaveLength(17);
-    expect(Object.keys(SETTING_DEFAULTS)).toHaveLength(17);
+  test('20 مفتاحاً: 17 من الملحق هـ + 3 مفاتيح طباعة (FR-13-03)', () => {
+    expect(SETTINGS_COUNT).toBe(20);
+    expect(listSettingKeys()).toHaveLength(20);
+    expect(Object.keys(SETTING_DEFAULTS)).toHaveLength(20);
   });
 
   test('المفاتيح المفصلية موجودة بأسمائها الحرفية', () => {
@@ -38,6 +38,9 @@ describe('settings: السجل نفسه', () => {
     expect(keys).toContain('invoicing.tax_mode');
     expect(keys).toContain('security.pin_lockout');
     expect(keys).toContain('backup.retention_count');
+    expect(keys).toContain('printing.paper');
+    expect(keys).toContain('printing.detailed');
+    expect(keys).toContain('printing.copies');
   });
 });
 
@@ -52,18 +55,18 @@ describe('settings: القراءة', () => {
 
   test('getSettings يدمج المخزن فوق الافتراضيات', async () => {
     const all = await getSettings();
-    expect(Object.keys(all)).toHaveLength(17);
+    expect(Object.keys(all)).toHaveLength(20);
     expect(all['invoicing.print_on_save']).toBe('ask');
     expect(all['display.numerals']).toBe('western');
   });
 });
 
 describe('settings: الزرع idempotent', () => {
-  test('الزرعة الأولى تكتب 17 صفاً بالقيم الافتراضية', async () => {
+  test('الزرعة الأولى تكتب 20 صفاً بالقيم الافتراضية', async () => {
     await seedDefaultSettings();
     const db = await getDb();
     const rows = await db.all<{ c: number }>('SELECT count(*) AS c FROM settings');
-    expect(rows[0]?.c ?? -1).toBe(17);
+    expect(rows[0]?.c ?? -1).toBe(20);
     expect(await getSetting('inventory.min_stock_alert')).toBe('on');
     expect(await getSetting('backup.schedule')).toBe('weekly');
   });
@@ -73,7 +76,7 @@ describe('settings: الزرع idempotent', () => {
     await seedDefaultSettings();
     const db = await getDb();
     const rows = await db.all<{ c: number }>('SELECT count(*) AS c FROM settings');
-    expect(rows[0]?.c ?? -1).toBe(17);
+    expect(rows[0]?.c ?? -1).toBe(20);
     expect(await getSetting('inventory.min_stock_alert')).toBe('off'); // بقيت كما عدلها
   });
 });

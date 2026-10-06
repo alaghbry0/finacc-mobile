@@ -1,5 +1,5 @@
 import type { DbEngine } from './types';
-import type { SqlJsDatabase } from 'sql.js';
+import type { SqlJsDatabase, SqlJsStatic } from 'sql.js';
 
 /**
  * محرك sql.js — للويب (مع استمرارية IndexedDB) وللاختبارات في node/bun (inMemory).
@@ -84,8 +84,11 @@ export async function clearWebPersistence(): Promise<void> {
 
 // ---------- المحرك ----------
 
-export async function createWebEngine(opts?: { inMemory?: boolean }): Promise<DbEngine> {
-  const inMemory = opts?.inMemory ?? false;
+/**
+ * تهيئة مصنع sql.js بالإعدادات الصحيحة للبيئة (متصفح/اختبار) —
+ * تصدير مشترك: يستخدمه المحرك هنا + فحص نسخ الاستعادة في services/backup.ts.
+ */
+export async function initSqlJsRuntime(): Promise<SqlJsStatic> {
   // كشف بيئة الاختبار: node/bun test بلا indexedDB
   const isNode = typeof indexedDB === 'undefined';
 
@@ -109,8 +112,14 @@ export async function createWebEngine(opts?: { inMemory?: boolean }): Promise<Db
     // في المتصفح: الـ wasm يُخدم من مسار المعاينة (ينسخه سكربت البناء)
     config.locateFile = (file: string) => '/rn/assets/' + file;
   }
+  return initSqlJs(config);
+}
 
-  const SQL = await initSqlJs(config);
+export async function createWebEngine(opts?: { inMemory?: boolean }): Promise<DbEngine> {
+  const inMemory = opts?.inMemory ?? false;
+  const isNode = typeof indexedDB === 'undefined';
+
+  const SQL = await initSqlJsRuntime();
 
   // الاسترجاع من IndexedDB (متصفح فقط، خارج وضع الاختبار)
   let db: SqlJsDatabase;
@@ -125,16 +134,19 @@ export async function createWebEngine(opts?: { inMemory?: boolean }): Promise<Db
 
   let txDepth = 0;
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
+  // بعد الاستعادة (importDbBytes): نمنع أي كتابة لاحقة من النسخة القديمة في الذاكرة
+  // (حتى pagehide) — ثم يُعاد تحميل التطبيق فوراً من الطالب.
+  let suppressPersist = false;
 
   async function flushNow(): Promise<void> {
-    if (inMemory || isNode) return;
+    if (inMemory || isNode || suppressPersist) return;
     const bytes = db.export();
     await idbPut(bytes);
   }
 
   /** جدولة تصدير كامل مع debounce 400ms. */
   function schedulePersist(): void {
-    if (inMemory || isNode) return;
+    if (inMemory || isNode || suppressPersist) return;
     if (persistTimer !== null) clearTimeout(persistTimer);
     persistTimer = setTimeout(() => {
       persistTimer = null;
@@ -227,6 +239,34 @@ export async function createWebEngine(opts?: { inMemory?: boolean }): Promise<Db
 
     persist(): void {
       schedulePersist();
+    },
+
+    /** تصدير بايتات القاعدة كاملة — للنسخ الاحتياطي اليدوي/التلقائي (الويب). */
+    async exportDbBytes(): Promise<Uint8Array> {
+      // db.export يلتقط الحالة الراهنة في الذاكرة؛ أي جدولة سابقة لا تؤثر عليها
+      // (وpagehide يظل يفرض الحفظ الفوري عند الإخفاء).
+      return db.export();
+    },
+
+    /** استبدال الاستمرارية ببايتات نسخة أخرى + منع الكتابة من النسخة القديمة (FR-11-02). */
+    async importDbBytes(bytes: Uint8Array): Promise<void> {
+      if (txDepth > 0) {
+        throw new Error('لا يمكن استبدال القاعدة داخل معاملة مفتوحة — أعد المحاولة');
+      }
+      // إيقاف أي حفظ مجدول من النسخة القديمة قبل لمس أي شيء
+      suppressPersist = true;
+      if (persistTimer !== null) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+      }
+      // فحص قابلية القراءة قبل الاستبدال — بايتات تالفة ترفض هنا نظيفاً
+      const next = new SQL.Database(bytes);
+      next.exec('PRAGMA foreign_keys = ON;');
+      db.close();
+      db = next;
+      if (!inMemory && !isNode) {
+        await idbPut(bytes); // استمرارية المتصفح تُستبدل أيضاً
+      }
     },
   };
 

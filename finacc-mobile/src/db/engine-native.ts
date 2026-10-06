@@ -69,6 +69,20 @@ export async function createNativeEngine(): Promise<DbEngine> {
     persist(): void {
       // no-op — القاعدة على القرص (WAL) على الجهاز، لا حاجة لتصدير يدوي
     },
+
+    /** تصدير بايتات ملف القاعدة بعد checkpoint — للنسخ الاحتياطي (الجهاز). */
+    async exportDbBytes(): Promise<Uint8Array> {
+      await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE);');
+      const FileSystem = await import('expo-file-system/legacy');
+      const src = `${FileSystem.documentDirectory}SQLite/finacc.db`;
+      const b64 = await FileSystem.readAsStringAsync(src, { encoding: FileSystem.EncodingType.Base64 });
+      return Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    },
+
+    /** إغلاق الاتصال — قبل استبدال ملف القاعدة عند الاستعادة (FR-11-02). */
+    async close(): Promise<void> {
+      await db.closeAsync();
+    },
   };
 
   return engine;

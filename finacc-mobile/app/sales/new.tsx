@@ -32,6 +32,8 @@ import { ParkedCartsSheet } from '@/screens/sales/ParkedCartsSheet';
 import { PaymentSheet } from '@/screens/sales/PaymentSheet';
 import { ScanSaleSheet } from '@/screens/sales/ScanSaleSheet';
 import { DailyRateSheet } from '@/screens/invoices/DailyRateSheet';
+import { printInvoice } from '@/services/doc-print';
+import { printing as pr } from '@/i18n/ar';
 import { common, fill, sales as t } from '@/i18n/ar';
 import {
   CreditLimitConfirmationRequiredError,
@@ -319,12 +321,17 @@ export default function NewSaleScreen() {
           return;
         }
 
-        // نجاح الفاتورة المكتملة: تفريغ + toast + (طباعة؟) + بطاقة النجاح
+        // نجاح الفاتورة المكتملة: تفريغ + toast + طباعة عند الحفظ (FR-02-14) + بطاقة النجاح
         setPaymentTotal(null);
         useCartStore.getState().clear();
         showToast(fill(t.savedToast, { no: res.invoiceNo ?? String(res.invoiceId) }));
-        if (defaults?.printOnSave === 'print') showToast(t.printPlaceholder);
         setSuccess({ id: res.invoiceId, no: res.invoiceNo });
+        // invoicing.print_on_save = 'print' → تُفتح الطباعة تلقائياً فور الحفظ
+        if (defaults?.printOnSave === 'print') {
+          void printInvoice('sale', res.invoiceId).catch((err: unknown) => {
+            showToast(err instanceof Error ? err.message : pr.printFailed, { duration: 7000 });
+          });
+        }
       } catch (e) {
         if (e instanceof MissingRateError) {
           setRateSheet({ currencyId: e.currencyId, date: e.date });
@@ -955,8 +962,13 @@ export default function NewSaleScreen() {
             <SecondaryButton
               label={t.printNow}
               onPress={() => {
-                showToast(t.printPlaceholder);
+                const target = success;
                 setSuccess(null);
+                if (target !== null) {
+                  void printInvoice('sale', target.id).catch((err: unknown) => {
+                    showToast(err instanceof Error ? err.message : pr.printFailed, { duration: 7000 });
+                  });
+                }
               }}
             />
           ) : null}
