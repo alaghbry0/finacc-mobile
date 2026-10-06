@@ -227,3 +227,5 @@ Stage Summary:
 - ملفات ملتزمة: metro.config.js (إصلاح node:fs الحرج لأي بناء أصلي) + scripts/empty-module.js + .gitignore (استبعاد android/) + package.json (سكربتا android/ios من prebuild).
 - النمط الموثق للبناء مستقبلاً: expo prebuild --platform android ثم gradlew assembleRelease مع JAVA_HOME وANDROID_HOME.
 - APK التسليم: finacc-v1.0.0-arm64.apk (arm64-v8a — يناسب أي هاتف أندرويد حديث؛ 32-bit القديم جداً يحتاج بناء شاملاً بمعماريات إضافية).
+- **الرابط النهائي للتثبيت**: https://github.com/alaghbry0/finacc-mobile/releases/download/v1.0.0/finacc-v1.0.0-arm64.apk
+- صفحة الإصدار (مع التعليمات): https://github.com/alaghbry0/finacc-mobile/releases/tag/v1.0.0
