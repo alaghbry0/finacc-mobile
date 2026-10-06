@@ -4,3 +4,7 @@ dist/
 *.log
 .DS_Store
 expo-env.d.ts
+
+# مجلد الأندرويد يُولَّد عبر expo prebuild (لا يُلتزم بالمصدر)
+android/
+ios/

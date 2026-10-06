@@ -7,7 +7,9 @@
     "start": "expo start",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build:web": "bash scripts/build-rn-web.sh"
+    "build:web": "bash scripts/build-rn-web.sh",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "@expo-google-fonts/ibm-plex-sans-arabic": "^0.4.2",

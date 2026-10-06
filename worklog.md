@@ -207,3 +207,23 @@ Stage Summary:
 - **التحقق المتصفحي الكامل (المنسق، بيانات من الصفر عبر onboarding)**: بيع نقدي 2×1,200 → INV-2026-00001 → «طباعة الآن» → **نافذة طباعة بإيصال كامل** (رأس المنشأة + بنود + إجماليات + تذييل — هدف المستخدم الأول «تُحفظ ثم تُطبع» تحقق) | داشبورد: مبيعات 2,400/أرباح 600 (2×300)/1 فاتورة/صندوق 2,400 + رسم 30 يوم + الأكثر مبيعاً | مخزون 90→88 | P&L مطابق حرفياً (COGS 1,800 → صافي 600) | **طباعة تقرير P&L بجدول كامل** | الجرد: عدّ 90 → فرق +2.000 صحيح → اعتماد → مخزون 88→90 + **زيادات الجرد 1,800 في P&L** | نسخة احتياطية يدوية 312KB «سليمة» بسجل | حول: إحصاءات صحيحة + Integrity Check = ok | الإعدادات: قفل بادئة INV بعد الإصدار (قرار 6) ✓ | استمرارية IndexedDB عبر إعادة بناء التطبيق ✓ | خطوط Google 200 ✓ صفر 404 | صفر أخطاء متصفح.
 - لقطات: docs/wave6-{print-receipt,report-print,dashboard,about,stocktake?,settings-printing,landing,landing-mobile}.png
 - مؤجل موثق: بلوتوث ESC/POS على الجهاز (وضع الرستر جاهز — يتطلب جهازاً حقيقياً)، استيراد Excel، تحويل مخازن، FEFO دفعات — V1.1.
+
+---
+Task ID: 7 (نشر GitHub + بناء APK)
+Agent: المنسق الرئيسي
+Task: رفع المشروع إلى مستودع GitHub عام وبناء APK حقيقي قابل للتثبيت وتسليم رابطه عبر GitHub Releases
+
+Work Log:
+- أنشئ مستودع alaghbry0/finacc-mobile (عام) ورفع الفرع main كاملاً بسجل موجاته (1762ad0).
+- جهّزت بيئة Android كاملة داخل الساندبوكس: cmdline-tools + platform-tools + platforms;android-36 + build-tools;36.0.0 + JDK21 محمول (النظام فيه JRE فقط بلا javac — أُضيف org.gradle.java.home).
+- expo prebuild ولّد مشروع android/ ثم بناء assembleRelease عبر دفعات متتالية (البيئة تقتل العمليات الخلفية بين الطلبات — البناء بالواجهة الأمامية مع كاش Gradle هو النمط الناجح الوحيد).
+- **إصلاح جذري (metro.config.js)**: sql.js 1.14+ صار يستدعي require("node:fs") بالبادئة node: — وكان resolveRequest القديم (a) لا يشمل الصيغة المسبوقة، و(b) يقرأ context.originModule بينما Metro الحديثة تستخدم context.originModulePath — فكان الـ stub لا يعمل إطلاقاً (في الويب كانت حزمة sql.js تحل الأمر عبر حقل browser ولذلك لم يظهر الخلل). أُعيدت كتابته: كشف originModulePath/originModule معاً + قائمة تشمل node:* + إرجاع sourceFile إلى scripts/empty-module.js.
+- معضلة القرص (9.9G): NDK 2.0G يُنزّل تلقائياً — أُديرت الأزمة عبر: حذف كاشات المتصفح والـ ML غير المستخدمة، وحصر المعماريات على arm64-v8a، وحذف مخارج v7a القديمة.
+- NDK أُعيد تركيبه يدوياً: تنزيل zip مباشرة ثم استخراج انتقائي (استبعاد windows/python/shader-tools) لأن مساحة الذروة عبر sdkmanager غير كافية؛ الاستخراج قُطع عند المهلة فاكتُمل عبر سكربت python يقرأ الـ zip عن بُعد بطلبات HTTP Range (ناقص كان 57MB فقط)؛ **34 symlink كانت مخزنة كملفات نصية أُعيد إنشاؤها كروابط حقيقية (clang++ → clang)** — هذا كان سبب Permission denied.
+- **BUILD SUCCESSFUL**: app-release.apk بمعمارية arm64-v8a موقّع (debug cert قابل للتثبيت) يحوي index.android.bundle (hermes) + libexpo-sqlite.so + ملتي dex + نماذج باركود mlkit — 40MB.
+
+Stage Summary:
+- المستودع: https://github.com/alaghbry0/finacc-mobile (الفرع main محدّث).
+- ملفات ملتزمة: metro.config.js (إصلاح node:fs الحرج لأي بناء أصلي) + scripts/empty-module.js + .gitignore (استبعاد android/) + package.json (سكربتا android/ios من prebuild).
+- النمط الموثق للبناء مستقبلاً: expo prebuild --platform android ثم gradlew assembleRelease مع JAVA_HOME وANDROID_HOME.
+- APK التسليم: finacc-v1.0.0-arm64.apk (arm64-v8a — يناسب أي هاتف أندرويد حديث؛ 32-bit القديم جداً يحتاج بناء شاملاً بمعماريات إضافية).
