@@ -309,11 +309,20 @@ export default function Home() {
                 <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#22D3EE]/10 text-[#22D3EE]">
                   <Download className="h-6 w-6" aria-hidden />
                 </div>
-                <h3 className="mt-4 text-lg font-bold">APK كامل</h3>
+                <h3 className="mt-4 text-lg font-bold">APK جاهز للتثبيت</h3>
                 <p className="mt-1.5 flex-1 text-sm leading-relaxed text-[#CBD5E1]">
-                  بناء نسخة تثبيت نهائية على جهازك — يتطلب حساب Expo مجاني.
+                  حمّل نسخة أندرويد كاملة تعمل بلا إنترنت — أو ابنِها بنفسك عبر EAS.
                   الطباعة البلوتوثية والتشفير الكامل يعملان في نسخة APK فقط.
                 </p>
+                <a
+                  href="https://github.com/alaghbry0/finacc-mobile/releases/download/v1.0.1/finacc-v1.0.1-arm64.apk"
+                  className="mt-4 inline-flex items-center justify-center gap-2 rounded-xl bg-[#22D3EE] px-4 py-2.5 text-sm font-bold text-[#0B1220] transition hover:bg-[#67E8F9]"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <Download className="h-4 w-4" aria-hidden />
+                  تحميل finacc-v1.0.1-arm64.apk (40MB)
+                </a>
                 <pre
                   dir="ltr"
                   className="mt-4 overflow-x-auto rounded-xl border border-[#334155] bg-[#0B1220] px-4 py-3 text-left text-[13px] text-[#22D3EE] [font-family:ui-monospace,SFMono-Regular,Menlo,monospace]"
