@@ -118,3 +118,35 @@ Stage Summary:
 - التحقق المتصفحي (agent-browser): Onboarding كامل → الداشبورد بالتبويبات الخمسة ✓ | إعادة تحميل → شاشة القفل ✓ | PIN خاطئ → «رمز PIN غير صحيح — تبقى 4 محاولات» ✓ | PIN صحيح → فتح ✓ | تبويب المخزون يعمل ✓ | صفر أخطاء متصفح ✓.
 - لقطات: docs/wave2-dashboard.png + docs/wave2-inventory.png.
 - للموجات القادمة: كل شاشة جديدة تبدأ بـ <Screen> وتستخدم المكونات الجاهزة — لا تبنِ Modal/BottomSheet من الصفر. شاشات placeholder القائمة (inventory/cash/sales-new/parties/reports/installments/settings/printing + الداشبورد) ستُستبدل بالكامل.
+
+---
+Task ID: 3-a
+Agent: general-purpose (sonnet) + تدقيق المنسق
+Task: وحدة الأصناف والمخزون — دومين + اختبارات + شاشات (المرحلة 2 من SRS)
+
+Work Log:
+- src/utils/barcode.ts: توليد EAN-13 (بادئة 2 نطاق داخلي) + checksum + تحقق.
+- src/domain/inventory.ts: createProduct (توليد باركود، خدمي بلا مخزون، كمية افتتاحية كحركة opening داخل المعاملة) + updateProduct + archiveProduct (الباركود يبقى محجوزاً) + getProductFull (أسعار/أرصدة/حركات) + searchProducts (LIKE + رصيد + سعر أساس) + findByBarcode + adjustStock (manual_adjust + منع السالب برسالة تسمّي الصنف) + listBelowMinStock + فئات/وحدات CRUD كاملة.
+- الشاشات: (tabs)/inventory.tsx قائمة حية ببحث فوري وdebounce + BottomSheet مسح (ويب: إدخال يدوي) + inventory/new.tsx نموذج كامل (أسعار لكل عملة، خدمي، افتتاحية) + [id].tsx بطاقة صنف (QR + أرصدة مخازن + أسعار عملات + آخر 10 حركات + تعديل/أرشفة/تعديل رصيد) + alerts + categories + units + [id]/edit (نموذج مشترك ProductForm).
+- i18n: ar/inventory.ts كامل.
+
+Stage Summary:
+- البوابات: tsc صفر ✓ | bun test الكل أخضر ✓ | تصدير ✓ | متصفح: إنشاء صنف كامل (باركود مولد 2182524042020، تكلفة، سعر YER، كمية افتتاحية 10) → ظهور بالقائمة → بطاقة كاملة بحركة افتتاحية +10 ✓ | صفر أخطاء ✓.
+- مؤجل موثق: استيراد Excel (FR-01-13)، تحويل المخازن (FR-01-09 → V1.1)، الدفعات FEFO (FR-01-10)، تحديث الأسعار بالصرف (FR-01-11).
+- عقود الدوال النهائية في src/domain/inventory.ts — شاشة البيع (الموجة 4) تستخدم searchProducts/findByBarcode/getProductFull.
+
+---
+Task ID: 3-b
+Agent: general-purpose (sonnet) + تدقيق المنسق
+Task: الأطراف (عملاء/موردون) + إدارة العملات وأسعار الصرف — دومين + اختبارات + شاشات
+
+Work Log:
+- src/domain/parties.ts: CRUD عملاء/موردين (حد ائتمان NULL/0 semantics، رصيد افتتاحي بعملته وسعره وتاريخه) + customerBalances/supplierBalances بمعادلة القرار 8 الحرفية (opening + Σ sale.due − Σ receipts − Σ sale_return.due لكل عملة على حدة) + بحث.
+- توسيع src/domain/currency.ts: addCurrency/setCurrencyActive (الأساس لا يُعطل)/rateHistory/missingRateToday.
+- الشاشات: parties/index.tsx (تبويب عملاء/موردون + قائمة + رصيد بدلالة مدين/دائن) + نماذج إنشاء وتعديل لكل من العملاء والموردين (PartyForm مشترك) + ملفات [id] (أرصدة لكل عملة + اتصال/واتساب wa.me عبر open-url) + settings/index.tsx قائمة إعدادات حقيقية + settings/currencies.tsx (إدارة عملات + سعر اليوم + سجل + شارات النقص).
+- i18n: ar/parties.ts + ar/currency.ts + ar/settings.ts.
+
+Stage Summary:
+- البوابات: tsc صفر ✓ | bun test الكل أخضر (اختبار معادلة الرصيد بصفوف فواتير/سندات يدوية = AC-02 مبسط) ✓ | تصدير ✓ | متصفح: عميل «أحمد سعيد» برصيد افتتاحي 100,000 YER → مدين في القائمة والملف ✓ | سعر SAR أُدخل وحُفظ ✓ | شارة «لا سعر اليوم» تعمل ✓.
+- مؤجل موثق: كشف الحساب التفصيلي (FR-03-04 → موجة 5)، استيراد عملاء Excel (FR-03-08).
+- ملاحظة للموجة 4/5: معادلة الرصيد تستحقى من الجداول مباشرة — أي كتابة فاتورة/سند تلتزم بالمخطط تُحدّث الأرصدة تلقائياً بلا كود إضافي.

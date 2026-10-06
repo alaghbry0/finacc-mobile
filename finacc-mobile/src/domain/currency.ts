@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { getDb } from '@/db/client';
 import { dec, money, Decimal } from '@/utils/money';
+import { todayISO } from '@/utils/format';
 import { getSetting } from './settings';
 import { logAudit } from './audit';
 import { getCurrentUserId } from './session-user';
@@ -155,4 +156,115 @@ export async function getBaseCurrency(): Promise<CurrencyRow> {
 /** تحويل مبلغ بعملة أجنبية إلى العملة الأساسية بسعر محدد (مبلغ × سعر). */
 export function convertToBase(amount: Decimal, rate: Decimal): Decimal {
   return amount.times(rate);
+}
+
+// ============ إدارة العملات (Task 3-b — FR-08-02) ============
+
+const addCurrencySchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{2,8}$/, 'رمز العملة يجب أن يكون 2–8 أحرف لاتينية مثل SAR أو USD'),
+  name: z.string().trim().min(1, 'اسم العملة مطلوب — مثل «ريال سعودي»').max(60, 'اسم العملة طويل (60 حرفاً كحد أقصى)'),
+  decimals: z.number().int().min(0, 'عدد المنازل بين 0 و6').max(6, 'عدد المنازل بين 0 و6'),
+});
+
+/**
+ * إضافة عملة جديدة (FR-08-02): رمز فريد كبير (SAR/USD/AED…) + اسم + منازل عشرية.
+ * تُنشأ مفعّلة (is_active=1) وغير أساسية (is_base=0 — الأساس يتحدد في الإعداد الأولي فقط FR-08-01).
+ */
+export async function addCurrency(input: { code: string; name: string; decimals: number }): Promise<number> {
+  const parsed = addCurrencySchema.safeParse(input);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new Error(`مدخلات عملة جديدة غير صالحة: ${issue?.message ?? 'راجع الحقول'} (الحقل: ${issue?.path?.join('.') ?? '?'})`);
+  }
+  const code = parsed.data.code.toUpperCase();
+  const db = await getDb();
+  // فحص التميز (كود العملة UNIQUE — نفحص القضية أيضاً منعاً لـ sar/SAR)
+  const dup = await db.all<{ id: number }>('SELECT id FROM currency WHERE UPPER(code) = UPPER(?)', [code]);
+  if (dup.length > 0) {
+    throw new Error(`رمز العملة «${code}» مستخدم مسبقاً — اختر رمزاً آخر أو أعد تفعيل العملة الموقوفة من القائمة`);
+  }
+  let newId = 0;
+  await db.transaction(async () => {
+    const res = await db.run('INSERT INTO currency(code, name, is_base, decimals, is_active) VALUES(?, ?, 0, ?, 1)', [
+      code,
+      parsed.data.name,
+      parsed.data.decimals,
+    ]);
+    newId = Number(res.lastInsertRowId);
+    await logAudit('currency_add', {
+      entity: 'currency',
+      entityId: newId,
+      details: { code, name: parsed.data.name, decimals: parsed.data.decimals },
+    });
+  });
+  return newId;
+}
+
+/**
+ * تفعيل/تعطيل عملة — **العملة الأساسية لا تُعطّل أبداً** (FR-08-01: تتحدد في الإعداد الأولي ثم تثبت).
+ * تعطيل عملة لا يحذف أسعارها ولا أرصدتها؛ يزيلها فقط من القوائم والفواتير الجديدة.
+ */
+export async function setCurrencyActive(id: number, active: boolean): Promise<void> {
+  const db = await getDb();
+  const rows = await db.all<{ code: string; is_base: number }>('SELECT code, is_base FROM currency WHERE id = ?', [id]);
+  if (rows.length === 0) {
+    throw new Error(`عملة غير موجودة (رقم ${id}) — لا يمكن تغيير حالتها`);
+  }
+  if (Number(rows[0].is_base) === 1 && !active) {
+    throw new Error(`العملة الأساسية «${rows[0].code}» لا يمكن تعطيلها — العملة الأساسية تتحدد في الإعداد الأولي فقط ثم تثبت (FR-08-01)`);
+  }
+  await db.transaction(async () => {
+    await db.run('UPDATE currency SET is_active = ? WHERE id = ?', [active ? 1 : 0, id]);
+    await logAudit('currency_set_active', {
+      entity: 'currency',
+      entityId: id,
+      details: { code: rows[0].code, active },
+    });
+  });
+}
+
+/** صف من سجل أسعار عملة. */
+export interface RateHistoryRow {
+  rateDate: string;
+  rate: string;
+}
+
+/**
+ * سجل أسعار العملة تنازلياً (الأحدث أولاً — FR-08-03).
+ * limitDays: حد عدد الصفوف المعادة (الافتراضي 30؛ القائمة تعرض آخر 14 سعراً).
+ */
+export async function rateHistory(currencyId: number, limitDays = 30): Promise<RateHistoryRow[]> {
+  const db = await getDb();
+  const rows = await db.all<{ rate_date: string; rate: string | number }>(
+    'SELECT rate_date, rate FROM exchange_rate WHERE currency_id = ? ORDER BY rate_date DESC, id DESC LIMIT ?',
+    [currencyId, Math.max(1, Math.min(Math.floor(limitDays), 365))],
+  );
+  return rows.map((r) => ({ rateDate: r.rate_date, rate: money(r.rate) }));
+}
+
+/** كل العملات (مفعّلة وموقوفة) — الأساسية أولاً ثم المفعّلة ثم بالرمز. لشاشة الإعدادات. */
+export async function listAllCurrencies(): Promise<CurrencyRow[]> {
+  const db = await getDb();
+  return db.all<CurrencyRow>(
+    'SELECT id, code, name, symbol_svg, is_base, decimals, is_active FROM currency ' +
+      'ORDER BY is_base DESC, is_active DESC, code ASC',
+  );
+}
+
+/**
+ * العملات الفاعلة غير الأساسية التي لا سعر لها اليوم (FR-08-04/09 — أساس شارة
+ * «لا سعر اليوم — أدخله» وشاشة التذكير). سعر اليوم مطلوب قبل أي حركة بعملة غير الأساس.
+ */
+export async function missingRateToday(): Promise<CurrencyRow[]> {
+  const db = await getDb();
+  return db.all<CurrencyRow>(
+    'SELECT id, code, name, symbol_svg, is_base, decimals, is_active FROM currency c ' +
+      'WHERE c.is_active = 1 AND c.is_base = 0 AND NOT EXISTS (' +
+      '  SELECT 1 FROM exchange_rate e WHERE e.currency_id = c.id AND e.rate_date = ?) ' +
+      'ORDER BY c.code ASC',
+    [todayISO()],
+  );
 }

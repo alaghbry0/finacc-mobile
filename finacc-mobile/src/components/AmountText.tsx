@@ -18,6 +18,8 @@ interface AmountTextProps {
   size?: number;
   /** رمز/كود عملة يظهر بعد الرقم بخط الواجهة */
   suffix?: string;
+  /** لون صريح يتجاوز لون الدلالة (أرصدة الأطراف: كهرماني للمدين/أخضر للدائن — Task 3-b) */
+  color?: string;
   style?: ViewStyle;
 }
 
@@ -39,9 +41,10 @@ export function AmountText({
   decimals = 2,
   size = fontSizes.title,
   suffix,
+  color: colorOverride,
   style,
 }: AmountTextProps) {
-  const color = toneColor(tone);
+  const color = colorOverride ?? toneColor(tone);
   const d = new Decimal(value);
   const negative = d.isNegative();
   const body = formatMoney(d.abs(), decimals);
