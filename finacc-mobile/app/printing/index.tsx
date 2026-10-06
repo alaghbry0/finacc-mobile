@@ -1,7 +1,10 @@
-import { ComingSoon } from '@/components';
-import { tabs } from '@/i18n/ar';
+import { useEffect } from 'react';
+import { router } from 'expo-router';
 
-/** الطباعة والطابعة (stub — تُبنى في الموجة 6). */
-export default function PrintingScreen() {
-  return <ComingSoon title={tabs.printing} />;
+/** تحويل قديم — إعدادات الطباعة الحقيقية في /settings/printing (منذ الموجة 6). */
+export default function PrintingRedirect() {
+  useEffect(() => {
+    router.replace('/settings/printing');
+  }, []);
+  return null;
 }

@@ -17,11 +17,11 @@ export const tabs = {
   printing: 'الطباعة والطابعة',
   about: 'حول التطبيق',
 
-  // الداشبورد (مؤقت — يُستبدل في الموجة 6)
+  // الداشبورد (الموجة 6-a) — حالة الفراغ قبل أول حركة
   welcome: 'أهلًا، {name}',
   todayIs: 'اليوم {date}',
-  analyticsComingTitle: 'لوحة التحليلات قادمة',
-  analyticsComingMessage: 'ستعرض هنا خلاصة مبيعاتك وأرباحك وتنبيهات المخزون والأقساط المستحقة.',
+  analyticsComingTitle: 'لا ملخصات بعد',
+  analyticsComingMessage: 'ستعرض هنا خلاصة مبيعاتك وأرباحك وتنبيهات المخزون والأقساط المستحقة فور أول عملية.',
   salesToday: 'مبيعات اليوم',
   profitToday: 'أرباح اليوم',
   invoicesToday: 'فواتير اليوم',

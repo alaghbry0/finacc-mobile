@@ -22,6 +22,8 @@ import { salesByCustomer, salesByProduct, salesByDay } from '@/domain/reports/sa
 import { debtAging, type AgingRow } from '@/domain/reports/aging';
 import { productCard, stockSummary, type StockCard, type StockSummaryRow } from '@/domain/reports/stock-card';
 import { todayISO } from '@/utils/format';
+import { printReport, type PrintReportPayload } from '@/services/doc-print';
+import { useToastStore } from '@/store/toast';
 
 // ============ أنواع النتائج الموحدة ============
 
@@ -41,6 +43,140 @@ interface ViewerData {
 }
 
 type LoadState = 'loading' | 'ready' | 'error';
+
+// ============ تجهيز التقرير للطباعة (FR-10-09) ============
+
+/** يحوّل نتائج أي تقرير إلى حمولة طباعة جدولية موحّدة — null إن لا بيانات. */
+function buildPrintPayload(
+  reportId: string,
+  title: string,
+  data: ViewerData | null,
+  fmt: (v: string) => string,
+  dateFrom: string,
+  dateTo: string,
+): PrintReportPayload | null {
+  if (data === null) return null;
+  const period = { periodFrom: dateFrom, periodTo: dateTo };
+  if (reportId === 'profit-loss' && data.pl !== undefined) {
+    const pl = data.pl;
+    const num = (v: string, places = 4): string => fmt(new Decimal(v).toFixed(places));
+    return {
+      ...period,
+      title,
+      columns: [t.colItem, t.colValue],
+      rows: [
+        [t.plSales, fmt(pl.sales)],
+        [t.plSalesReturns, fmt(pl.salesReturns)],
+        [t.plNetSales, num(new Decimal(pl.sales).minus(new Decimal(pl.salesReturns)).toFixed(4))],
+        [t.plCogs, fmt(pl.cogs)],
+        [t.plCogsReturned, fmt(pl.cogsReturned)],
+        [t.plNetCogs, num(new Decimal(pl.cogs).minus(new Decimal(pl.cogsReturned)).toFixed(4))],
+        [t.plStocktakeGains, fmt(pl.stocktakeGains)],
+        [t.plStocktakeLosses, fmt(pl.stocktakeLosses)],
+        [
+          t.plFx,
+          `${new Decimal(pl.fxGainLoss).isNegative() ? '−' : '+'}${fmt(new Decimal(pl.fxGainLoss).abs().toFixed(4))}`,
+        ],
+        [t.plGrossProfit, fmt(pl.grossProfit)],
+        [t.plExpenses, fmt(pl.expenses)],
+        ...pl.expensesByCategory.map((c): string[] => [`— ${c.name}`, fmt(c.amount)]),
+        [t.plNetProfit, fmt(pl.netProfit)],
+        [t.plOwnerDraws, fmt(pl.ownerDraws)],
+      ],
+      totalRow: [t.plNetForOwner, fmt(pl.netForOwner)],
+      note: t.plFormulaNote,
+    };
+  }
+  if (reportId === 'sales-by-customer' && data.customers !== undefined) {
+    const { rows, total } = data.customers;
+    return {
+      ...period,
+      title,
+      columns: [t.colCustomer, t.colSales, t.colReturns, t.colNet, t.colInvoices],
+      rows: rows.map((r): string[] => [r.name, fmt(r.sales), fmt(r.returns), fmt(r.net), String(r.invoices)]),
+      totalRow: [t.colTotal, '', '', fmt(total), ''],
+    };
+  }
+  if (reportId === 'sales-by-product' && data.productsSales !== undefined) {
+    const { rows, total } = data.productsSales;
+    return {
+      ...period,
+      title,
+      columns: [t.colProduct, t.colQtySold, t.colSales, t.colReturns],
+      rows: rows.map((r): string[] => [r.name, r.qtySold, fmt(r.sales), fmt(r.returns)]),
+      totalRow: [t.colTotal, '', fmt(total), ''],
+    };
+  }
+  if (reportId === 'sales-by-day' && data.days !== undefined) {
+    const { rows, prevPeriodSales, changePct } = data.days;
+    return {
+      ...period,
+      title,
+      columns: [t.colDate, t.colSales, t.colNet],
+      rows: rows.map((r): string[] => [r.date, fmt(r.sales), fmt(r.net)]),
+      note:
+        `${t.prevPeriodLabel}: ${fmt(prevPeriodSales)} — ${t.changePctLabel}: ` +
+        (changePct === null ? t.noPrevPeriod : `${new Decimal(changePct).isNegative() ? '−' : '+'}${new Decimal(changePct).abs().toFixed(1)}%`),
+    };
+  }
+  if (reportId === 'product-card' && data.card !== undefined) {
+    const card = data.card;
+    return {
+      ...period,
+      title,
+      columns: [t.colDate, t.colType, t.colRefNo, t.colIn, t.colOut, t.colBalance, t.colUnitCost],
+      rows: card.lines.map(
+        (l): string[] => [
+          l.date,
+          typeLabel(l.type),
+          l.refNo ?? '',
+          l.in !== '0' ? l.in : '',
+          l.out !== '0' ? l.out : '',
+          l.balance,
+          l.unitCost,
+        ],
+      ),
+      totalRow: [t.colClosing, '', '', '', '', card.closing, ''],
+      note: `${t.colOpening}: ${card.opening} — ${t.colClosing}: ${card.closing}`,
+    };
+  }
+  if (reportId === 'stock-summary' && data.summary !== undefined) {
+    return {
+      ...period,
+      title,
+      columns: [t.colProduct, t.colOpening, t.colIn, t.colOut, t.colReturns, t.colAdjust, t.colClosing],
+      rows: data.summary.map(
+        (r): string[] => [r.name, r.opening, r.in, r.out, r.returns, r.adjust, r.closing],
+      ),
+    };
+  }
+  if (reportId === 'aging' && data.aging !== undefined) {
+    return {
+      ...period,
+      title,
+      columns: [t.colCustomer, t.colCurrency, t.colCurrent, t.colD30, t.colD60, t.colD90, t.colTotal],
+      rows: data.aging.map(
+        (r): string[] => [r.customer, r.currencyCode, fmt(r.current), fmt(r.d30), fmt(r.d60), fmt(r.d90), fmt(r.total)],
+      ),
+      note: t.agingByInvoice,
+    };
+  }
+  if (reportId === 'min-stock' && data.minStock !== undefined) {
+    return {
+      title,
+      columns: [t.colProduct, t.colOnHand, t.colMin, t.colShortBy],
+      rows: data.minStock.map(
+        (r): string[] => [
+          r.name,
+          r.totalQty,
+          r.minStock,
+          new Decimal(r.minStock).minus(new Decimal(r.totalQty)).toFixed(2),
+        ],
+      ),
+    };
+  }
+  return null;
+}
 
 const REPORT_TITLES: Record<string, string> = {
   'profit-loss': t.plTitle,
@@ -103,6 +239,8 @@ export default function ReportViewerScreen() {
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [decimals, setDecimals] = useState(2);
   const [baseCode, setBaseCode] = useState('');
+  const [printing, setPrinting] = useState(false);
+  const showToast = useToastStore((st) => st.show);
 
   // خيارات الأصناف والمخازن (لبطاقة الصنف)
   useEffect(() => {
@@ -188,6 +326,22 @@ export default function ReportViewerScreen() {
     [today],
   );
 
+  const doPrint = useCallback(async (): Promise<void> => {
+    const payload = buildPrintPayload(reportId ?? '', title, data, fmt, dateFrom, dateTo);
+    if (payload === null) {
+      showToast(t.reportEmptyTitle);
+      return;
+    }
+    setPrinting(true);
+    try {
+      await printReport(payload);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : common.errorGeneral);
+    } finally {
+      setPrinting(false);
+    }
+  }, [reportId, title, data, fmt, dateFrom, dateTo, showToast]);
+
   return (
     <Screen title={title} onBack={() => router.back()} scroll={false}>
       <ScrollView style={s.grow} contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
@@ -252,13 +406,18 @@ export default function ReportViewerScreen() {
           <Results reportId={reportId ?? ''} data={data} fmt={fmt} decimals={decimals} />
         )}
 
-        {/* ===== زر الطباعة (معطّل — توصلها الموجة 6-ب) ===== */}
+        {/* ===== زر الطباعة (FR-10-09) ===== */}
         <View style={s.printWrap}>
-          <Pressable accessibilityRole="button" accessibilityLabel={t.printLabel} disabled style={s.printBtn}>
-            <Printer size={18} color={colors.muted} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t.printLabel}
+            disabled={printing || data === null}
+            onPress={() => void doPrint()}
+            style={[s.printBtn, (printing || data === null) && s.printBtnDisabled]}
+          >
+            <Printer size={18} color={colors.accent} />
             <Text style={s.printLabel}>{t.printLabel}</Text>
           </Pressable>
-          <Text style={s.printHint}>{t.printDisabledHint}</Text>
         </View>
       </ScrollView>
     </Screen>
@@ -718,20 +877,17 @@ const s = StyleSheet.create({
     height: 48,
     borderRadius: radii.md,
     borderWidth: 1.5,
-    borderColor: colors.border,
+    borderColor: colors.accent,
     backgroundColor: colors.card,
+  },
+  printBtnDisabled: {
+    borderColor: colors.border,
     opacity: 0.55,
   },
   printLabel: {
     fontFamily: fonts.bodyMedium,
     fontSize: fontSizes.body,
-    color: colors.muted,
-  },
-  printHint: {
-    fontFamily: fonts.body,
-    fontSize: fontSizes.micro,
-    color: colors.muted,
-    textAlign: 'center',
+    color: colors.accent,
   },
   // قائمة الأرباح
   plLine: {

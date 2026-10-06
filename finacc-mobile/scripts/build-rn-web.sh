@@ -38,4 +38,17 @@ cp -r dist/* ../public/rn/
 mkdir -p ../public/rn/assets
 cp node_modules/sql.js/dist/sql-wasm.wasm ../public/rn/assets/sql-wasm.wasm
 cp node_modules/sql.js/dist/sql-wasm-browser.wasm ../public/rn/assets/sql-wasm-browser.wasm
+# خطوط Google: يطلبها المتصفح من /rn/assets/node_modules/@expo-google-fonts/.../<Name>.<md5>.ttf
+# (نسخة صريحة ضماناً — Metro قد لا يصدرها في بعض الإصدارات)
+if [ -d node_modules/@expo-google-fonts ]; then
+  find node_modules/@expo-google-fonts -name '*.ttf' | while read -r ttf; do
+    rel="${ttf#node_modules/}"
+    base="$(basename "$ttf" .ttf)"
+    hash="$(md5sum "$ttf" | cut -d' ' -f1)"
+    dest="../public/rn/assets/${rel%/*}/${base}.${hash}.ttf"
+    mkdir -p "${dest%/*}"
+    cp "$ttf" "$dest"
+  done
+  echo "[finacc] google-fonts copied with md5 names"
+fi
 echo "[finacc] DONE → http://127.0.0.1:3000/rn/index.html"

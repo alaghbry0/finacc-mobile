@@ -327,6 +327,17 @@ function StocktakeRowView({
   const diff = line.diffQty;
   const diffValue =
     diff === null ? null : new Decimal(diff).times(new Decimal(line.unitCost));
+  // الفرق المعروض هو diffQty نفسه (موقّعاً) — لا يُعاد حسابه من الدفتري
+  const diffColorFinal =
+    diff === null || new Decimal(diff).isZero()
+      ? colors.textSecondary
+      : new Decimal(diff).isNegative()
+        ? colors.error
+        : colors.success;
+  const diffTextFinal =
+    diff === null
+      ? '—'
+      : `${new Decimal(diff).isNegative() ? '−' : '+'}${formatMoney(new Decimal(diff).abs(), 3)}`;
   return (
     <Pressable
       accessibilityRole="button"
@@ -354,8 +365,8 @@ function StocktakeRowView({
           </View>
         )}
       </View>
-      <Text style={[s.rowNum, { color: diff === null ? colors.muted : diffColor(line.bookQty, diff) }]}>
-        {diff === null ? '—' : diffText(line.bookQty, diff)}
+      <Text style={[s.rowNum, { color: diff === null ? colors.muted : diffColorFinal }]}>
+        {diffTextFinal}
       </Text>
     </Pressable>
   );

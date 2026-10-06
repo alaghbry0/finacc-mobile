@@ -1,6 +1,7 @@
 import { setDbEngineForTesting } from './client';
 import { createWebEngine } from './engine-web';
 import { runMigrations } from './migrate';
+import { setCurrentUserId } from '@/domain/session-user';
 
 /**
  * مساعد اختبارات (يعمل في bun):
@@ -14,7 +15,8 @@ export async function createTestDb() {
   return engine;
 }
 
-/** يفكك قاعدة الاختبار ويعيد المحرك الحالي إلى null. */
+/** يفكك قاعدة الاختبار ويعيد المحرك الحالي إلى null (مع مسح هوية المستخدم الجلسية لمنع تسرب الحالة بين الملفات). */
 export function disposeTestDb(): void {
   setDbEngineForTesting(null);
+  setCurrentUserId(null);
 }

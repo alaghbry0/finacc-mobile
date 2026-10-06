@@ -27,7 +27,7 @@ export default function MoreScreen() {
     { key: 'parties', title: tabs.parties, icon: <Users size={22} color={colors.accent} />, route: '/parties' },
     { key: 'reports', title: tabs.reports, icon: <FileBarChart size={22} color={colors.accent} />, route: '/reports' },
     { key: 'installments', title: tabs.installments, icon: <Wallet2 size={22} color={colors.warning} />, route: '/installments' },
-    { key: 'printing', title: tabs.printing, icon: <Printer size={22} color={colors.textSecondary} />, route: '/printing' },
+    { key: 'printing', title: tabs.printing, icon: <Printer size={22} color={colors.textSecondary} />, route: '/settings/printing' },
     { key: 'settings', title: tabs.settings, icon: <Settings size={22} color={colors.textSecondary} />, route: '/settings' },
   ];
 

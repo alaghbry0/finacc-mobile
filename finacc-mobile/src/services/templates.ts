@@ -528,3 +528,62 @@ ${data.notes !== null && data.notes !== undefined && data.notes.length > 0 ? `<d
 
   return document(`تقرير وردية ${data.cashboxName}`, 'a4', body, extraCss);
 }
+
+// ============ قالب التقارير العامة (FR-10-09 — مشاركة/طباعة أي تقرير) ============
+
+export interface ReportTemplateData {
+  company: TemplateCompany;
+  title: string;
+  /** بداية الفترة ISO أو null */
+  periodFrom?: string | null;
+  /** نهاية الفترة ISO أو null */
+  periodTo?: string | null;
+  columns: string[];
+  /** صفوف نصية جاهزة (منسقة) — الأعمدة غير الأولى تُعرض كأرقام LTR */
+  rows: string[][];
+  /** صف إجمالي أسفل الجدول (اختياري) */
+  totalRow?: string[] | null;
+  /** ملاحظة أسفل الجدول (اختياري) */
+  note?: string | null;
+}
+
+export function reportHtml(data: ReportTemplateData): string {
+  const extraCss = `
+.tbl { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.95em; }
+.tbl th, .tbl td { border: 1px solid #cbd5e1; padding: 5px 8px; }
+.tbl th { background: #f1f5f9; font-weight: 700; }
+.tbl td:not(:first-child), .tbl th:not(:first-child) { text-align: center; font-variant-numeric: tabular-nums; direction: ltr; }
+.tbl tr.total td { background: #f8fafc; font-weight: 800; }
+.period { text-align: center; color: #475569; margin-top: 4px; }
+.rnote { margin-top: 12px; color: #475569; font-size: 0.9em; }`;
+
+  const period =
+    data.periodFrom !== null && data.periodFrom !== undefined && data.periodTo !== null && data.periodTo !== undefined
+      ? `<div class="period">${fmtDate(data.periodFrom)} — ${fmtDate(data.periodTo)}</div>`
+      : '';
+  const head = `<tr>${data.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>`;
+  const body =
+    data.rows
+      .map((r) => `<tr>${r.map((c, i) => `<td${i > 0 ? ' class="num"' : ''}>${esc(c)}</td>`).join('')}</tr>`)
+      .join('\n') || `<tr><td colspan="${data.columns.length}" style="text-align:center;color:#94a3b8">—</td></tr>`;
+  const total =
+    data.totalRow !== null && data.totalRow !== undefined
+      ? `<tr class="total">${data.totalRow.map((c, i) => `<td${i > 0 ? ' class="num"' : ''}>${esc(c)}</td>`).join('')}</tr>`
+      : '';
+
+  const html = `<div class="sheet">
+${companyHeaderHtml(data.company)}
+<hr class="dash">
+<div class="doc-title">${esc(data.title)}</div>
+${period}
+<table class="tbl">
+${head}
+${body}
+${total}
+</table>
+${data.note !== null && data.note !== undefined && data.note.length > 0 ? `<div class="rnote">${esc(data.note)}</div>` : ''}
+<div class="gen">${esc(data.title)} — المُحاسِب الشخصي</div>
+</div>`;
+
+  return document(data.title, 'a4', html, extraCss);
+}

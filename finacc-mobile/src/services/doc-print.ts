@@ -12,6 +12,7 @@ import {
   voucherHtml,
   statementHtml,
   shiftHtml,
+  reportHtml,
   type InvoiceTemplateData,
   type PaperSize,
   type StatementTemplateData,
@@ -293,4 +294,32 @@ export async function printShiftReport(shift: ShiftRow, cashboxName: string): Pr
     notes: shift.notes,
   };
   await printHtml(shiftHtml(data), `وردية-${cashboxName}`);
+}
+
+// ============ التقارير العامة (FR-10-09 — طباعة/مشاركة أي تقرير) ============
+
+export interface PrintReportPayload {
+  title: string;
+  columns: string[];
+  rows: string[][];
+  periodFrom?: string | null;
+  periodTo?: string | null;
+  totalRow?: string[] | null;
+  note?: string | null;
+}
+
+/** طباعة أي تقرير جدولي بقالب A4 موحّد (رأس المنشأة + الفترة + الجدول). */
+export async function printReport(payload: PrintReportPayload): Promise<void> {
+  const company = await getCompanyHeader();
+  const html = reportHtml({
+    company,
+    title: payload.title,
+    periodFrom: payload.periodFrom ?? null,
+    periodTo: payload.periodTo ?? null,
+    columns: payload.columns,
+    rows: payload.rows,
+    totalRow: payload.totalRow ?? null,
+    note: payload.note ?? null,
+  });
+  await printHtml(html, payload.title);
 }
