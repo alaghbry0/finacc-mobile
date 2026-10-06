@@ -28,7 +28,27 @@ export const colors = {
   light: { bg: '#F8FAFC', card: '#FFFFFF', accent: '#0891B2', text: '#0F172A' },
   /** رمادي «معلّق» من قواعد دلالة الألوان (§6.1) */
   muted: '#64748B',
+  /**
+   * خلفيات باهتة (12% شفافية) لشريحات الحالة والأزرار الخطرة — DS-26/DS-27.
+   * تُستخدم كخلفية مع نص بلون الدلالة الكامل (تباين عالٍ فوقها).
+   */
+  extra: {
+    successSoft: 'rgba(52, 211, 153, 0.12)',
+    errorSoft: 'rgba(248, 113, 113, 0.12)',
+    warningSoft: 'rgba(251, 191, 36, 0.12)',
+    accentSoft: 'rgba(34, 211, 238, 0.12)',
+    mutedSoft: 'rgba(100, 116, 139, 0.16)',
+  },
 } as const;
+
+/** خلفية باهتة لأي لون دلالي (للاستخدامات الديناميكية خارج extra الثابتة). */
+export function softTint(hex: string, alpha = 0.12): string {
+  const m = hex.replace('#', '');
+  const r = parseInt(m.slice(0, 2), 16);
+  const g = parseInt(m.slice(2, 4), 16);
+  const b = parseInt(m.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 export const spacing = {
   xs: 4,

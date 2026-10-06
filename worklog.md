@@ -77,3 +77,44 @@ Stage Summary:
 - API للوكلاء اللاحقين: `import { getDb, setDbEngineForTesting } from '@/db/client'` + `DbEngine` من '@/db/types' + `getDrizzle()` من '@/db/drizzle' + المعاملات حصراً عبر `db.transaction(fn)` (لا drizzle.transaction) + مساعد الاختبارات `createTestDb/disposeTestDb` من '@/db/test-db' + الأنواع من '@/db/schema'.
 - جدول currency بلا created_at/updated_at (كما في DDL حرفياً) — انتبه عند الإدراج.
 - الالتزام: المنسق يلتزم git بعد كل موجة؛ الوكلاء لا يشغّلون git.
+
+---
+Task ID: 2-a
+Agent: general-purpose (sonnet) + تدقيق المنسق
+Task: طبقة الدومين النقية الأساسية + اختبارات منطق الأعمال (المرحلة 1 من SRS)
+
+Work Log:
+- src/utils/money.ts: dec/money/roundTo(HALF_UP موثق)/formatMoney/formatSigned عبر decimal.js (precision 28).
+- src/services/crypto.ts: hashPin (PBKDF2 100k عبر globalThis.crypto.suble، صيغة pbkdf2$iters$salt$hash) + verifyPinHash + randomId.
+- src/domain/settings.ts: سجل إعدادات الملحق هـ كاملاً (17 مفتاحاً) مع zod لكل نطاق + seedDefaultSettings (idempotent).
+- src/domain/docseq.ts: nextDocNumber بـ UPSERT ذري (RETURNING غير مدعوم في sql.js — UPSERT ثم SELECT داخل نفس المعاملة، آمن بأحادية الخيط + قفل المعاملة).
+- src/domain/fiscal.ts: assertPeriodOpen/assertBackdateAllowed (FiscalPeriodClosedError / BackdateConfirmationRequiredError).
+- src/domain/currency.ts: getRateSnapshot (قرار 3: MissingRateError افتراضياً / fx.fallback=last_known بعلم rateIsFallback) + setDailyRate (UPSERT) + listActiveCurrencies/getBaseCurrency/convertToBase.
+- src/domain/posting-map.ts: خريطة الترحيل الملزمة (ملحق و) — 9 حسابات، كل tx_type/movement_type + أحداث الشيكات والبيع/الشراء، مع getPosting.
+- src/domain/audit.ts + session-user.ts: logAudit + تتبع currentUserId للسجلات.
+- src/domain/onboarding.ts: isOnboarded/completeOnboarding داخل transaction واحدة (عملات + شركة + مخزن رئيسي + صندوق رئيسي + app_user + 5 فئات مصاريف بينها «رواتب» + seedDefaultSettings).
+- src/domain/auth.ts: verifyPin بسياسة قفل القرار 4 (5+ → تأخير متصاعد 30ث×2^n حتى 15د، 10+ → requirePassphrase) + recordUnlockSuccess + verifyPassphraseAndUnlock.
+- الاختبارات: 9 ملفات — docseq (100 استدعاء متوازٍ بلا تكرار/فجوات)، fiscal، currency، settings، posting-map، onboarding (ذرّية الفشل)، auth (تصعيد القفل)، money.
+
+Stage Summary:
+- البوابات: tsc صفر أخطاء ✓ | bun test: **116 pass / 0 fail** ✓.
+- عقود الدوال متاحة للجميع عبر المسارات أعلاه — أي تعديل مستقبلي عليها يستلزم تحديث الاختبارات.
+- على الوكلاء اللاحقين: استخدموا dec()/money() من '@/utils/money' لكل عملية مالية (لا float أبداً)، وlogAudit لكل حدث حساس، وgetPosting للتحقق من أثر أي حركة.
+
+---
+Task ID: 2-b
+Agent: general-purpose (sonnet) + تدقيق المنسق
+Task: نظام التصميم DS-17→40 + i18n سجل وحدات + الهيكل التنقلي + Onboarding + قفل PIN
+
+Work Log:
+- i18n كسجل وحدات: src/i18n/ar.ts فهرس يجمع ar/common.ts + ar/auth.ts + ar/tabs.ts (الوكلاء اللاحقون يضيفون ملفاتهم ويسجلونها في الفهرس).
+- نظام تصميم كامل في src/components (24 ملفاً + barrel index): Screen, AppCard, AmountText (tnum + علامة غير لونية), StatTile, buttons (Primary/Secondary/Danger/Icon ≥48), SearchBar, ListRow, BottomSheet, EmptyState, NoResultsState, ErrorState, PermissionBlocked, LoadingSkeleton, StatusChip, ConfirmSheet (كلمة تأكيد للأخطار), FeedbackBar + store/toast (Undo), NumberPad, QtyStepper, OfflineBanner (ويب), fields (Field/TextField/PasswordField/SelectField/DateField), SectionTitle, Chip, ComingSoon.
+- src/store/session.ts: آلة حالات boot/onboarding/locked/unlocked + unlock(pin) عبر domain + autolock بمؤقت خمول (security.autolock_minutes) + unlockDirect.
+- الهيكل: app/_layout.tsx (خطوط + boot + توجيه) + app/(tabs)/_layout.tsx (4 تبويبات + زر بيع وسط بارز بتدرج سماوي router.push('/sales/new')) + dashboards/placeholders للمخزون والنقدية + more.tsx قائمة فعلية (أطراف/تقارير/أقساط/إعدادات/طباعة/حول → stubs ComingSoon على مسارات المستقبل) + sales/new.tsx stub. حُذفت شاشة التحقق القديمة.
+- app/auth/onboarding.tsx: 3 شرائح ترحيب → نموذج منشأة (اسم/هاتف/واتساب/عنوان/عملة YER افتراضياً/ضريبة 0) → إنشاء PIN 4-6 أرقام بتأكيد عبر NumberPad → «ابدأ الآن» (hashPin + completeOnboarding).
+- app/auth/login.tsx: قفل + NumberPad + زر «فتح» + اهتزاز عند الخطأ + رسائل المحاولات المتبقية + عداد قفل تنازلي + وضع عبارة المرور + زر بصمة (native فقط).
+
+Stage Summary:
+- التحقق المتصفحي (agent-browser): Onboarding كامل → الداشبورد بالتبويبات الخمسة ✓ | إعادة تحميل → شاشة القفل ✓ | PIN خاطئ → «رمز PIN غير صحيح — تبقى 4 محاولات» ✓ | PIN صحيح → فتح ✓ | تبويب المخزون يعمل ✓ | صفر أخطاء متصفح ✓.
+- لقطات: docs/wave2-dashboard.png + docs/wave2-inventory.png.
+- للموجات القادمة: كل شاشة جديدة تبدأ بـ <Screen> وتستخدم المكونات الجاهزة — لا تبنِ Modal/BottomSheet من الصفر. شاشات placeholder القائمة (inventory/cash/sales-new/parties/reports/installments/settings/printing + الداشبورد) ستُستبدل بالكامل.

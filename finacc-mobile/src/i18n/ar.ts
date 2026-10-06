@@ -1,20 +1,13 @@
 /**
- * سجل النصوص العربية — V1: كائن مؤقت واحد (common) بمفاتيح مسطحة نقية.
- * (كل وحدة لاحقة تضيف ملفها الخاص وفق القرار في worklog §i18n).
+ * فهرس النصوص العربية (NFR-10) — سجل وحدات:
+ * كل وكيل يضيف ملف وحدته داخل src/i18n/ar/ ثم يسجّله هنا فقط — بلا تعارض دمج.
+ * الاستيراد الموحّد: `import { ar } from '@/i18n/ar'` (أو { common } مباشرة).
  */
-export const common = {
-  appName: 'المُحاسِب الشخصي',
-  tagline: 'محاسبة ومخزون — أوفلاين 100%',
-  dbCheckTitle: 'فحص قاعدة البيانات',
-  tables: 'عدد الجداول',
-  migrationVersion: 'إصدار الهجرة المطبق',
-  currencies: 'العملات (seed)',
-  companies: 'الشركات',
-  seedData: 'إنشاء بيانات تجريبية',
-  clearData: 'مسح البيانات',
-  loading: 'جارٍ تهيئة قاعدة البيانات…',
-  errorTitle: 'حدث خطأ',
-  engineNote: 'sql.js + IndexedDB في المعاينة — expo-sqlite على الجهاز',
-} as const;
+import { common, fill } from './ar/common';
+import { auth } from './ar/auth';
+import { tabs } from './ar/tabs';
 
-export const ar = { common };
+export { fill };
+export { common, auth, tabs };
+
+export const ar = { common, auth, tabs };
