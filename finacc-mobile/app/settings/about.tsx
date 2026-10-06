@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Platform, StyleSheet, Text, View } from 'react-native';
 import { Pressable } from 'react-native';
 import { router } from 'expo-router';
 import { CheckCircle2, Database, Eraser, HardDrive, ShieldCheck } from 'lucide-react-native';
@@ -12,7 +12,7 @@ import {
   StatTile,
 } from '@/components';
 import { common, settings as t } from '@/i18n/ar';
-import { getDb } from '@/db/client';
+import { getDb, setDbEngineForTesting } from '@/db/client';
 import { useToastStore } from '@/store/toast';
 import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
 
@@ -21,7 +21,7 @@ import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
  * (PRAGMA integrity_check) + مسح بيانات المعاينة (بيئة الويب) بكلمة تأكيد.
  */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 
 type LoadState = 'loading' | 'ready' | 'error';
 
@@ -103,17 +103,40 @@ export default function AboutScreen() {
   const doWipe = useCallback(async (): Promise<void> => {
     setWiping(true);
     try {
-      // ويب: حذف قاعدة IndexedDB المحفوظة بالكامل ثم إعادة التحميل للإعداد الأولي
-      await new Promise<void>((resolve, reject) => {
-        const req = indexedDB.deleteDatabase('finacc');
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(new Error(req.error?.message ?? 'deleteDatabase failed'));
-        // المتصفح قد يعلّق الحذف إن كانت القاعدة مفتوحة — نتابع بعد مهلة قصيرة
-        setTimeout(() => resolve(), 1500);
-      });
+      if (Platform.OS === 'web') {
+        // ويب: حذف قاعدة IndexedDB المحفوظة بالكامل ثم إعادة التحميل للإعداد الأولي
+        await new Promise<void>((resolve, reject) => {
+          const req = indexedDB.deleteDatabase('finacc');
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(new Error(req.error?.message ?? 'deleteDatabase failed'));
+          // المتصفح قد يعلّق الحذف إن كانت القاعدة مفتوحة — نتابع بعد مهلة قصيرة
+          setTimeout(() => resolve(), 1500);
+        });
+        showToast(t.wipeDone);
+        setTimeout(() => {
+          window.location.reload();
+        }, 600);
+        return;
+      }
+      // جهاز: إغلاق الاتصال → حذف الملف وملفَي WAL/SHM → إعادة تشغيل تلقائية
+      // (التطبيق يُنشئ قاعدة جديدة بالمهاجرات عند الإقلاع) — Task Android-Fix
+      const engine = await getDb();
+      await engine.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      await engine.close?.();
+      setDbEngineForTesting(null);
+      const FileSystem = await import('expo-file-system/legacy');
+      const mainPath = `${FileSystem.documentDirectory}SQLite/finacc.db`;
+      await FileSystem.deleteAsync(mainPath, { idempotent: true });
+      await FileSystem.deleteAsync(`${mainPath}-wal`, { idempotent: true });
+      await FileSystem.deleteAsync(`${mainPath}-shm`, { idempotent: true });
       showToast(t.wipeDone);
-      setTimeout(() => {
-        window.location.reload();
+      setTimeout(async () => {
+        try {
+          const { reloadAppAsync } = await import('expo');
+          await reloadAppAsync('wipe-preview-data');
+        } catch {
+          /* نادر: المستخدم يغلق التطبيق ويفتحه يدوياً */
+        }
       }, 600);
     } catch (e) {
       setWiping(false);

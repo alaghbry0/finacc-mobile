@@ -4,6 +4,7 @@ import { ShoppingBasket, Trash2 } from 'lucide-react-native';
 import { BottomSheet, PrimaryButton, SecondaryButton } from '@/components';
 import type { ParkedCartMeta } from '@/store/cart';
 import { sales as t } from '@/i18n/ar';
+import { common } from '@/i18n/ar';
 import { formatMoney } from '@/utils/format';
 import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
 
@@ -34,7 +35,8 @@ export function ParkedCartsSheet({ visible, onClose, parked, currencyCode, onRes
                   {p.title}
                 </Text>
                 <Text style={s.meta} numberOfLines={1}>
-                  {new Date(p.savedAt).toLocaleDateString('ar')} • {p.itemCount} بند •{' '}
+                  {/* Intl غير مضمون على Hermes — common.formatDate (Task Android-Fix) */}
+                  {common.formatDate(String(p.savedAt).slice(0, 10))} • {p.itemCount} بند •{' '}
                   {formatMoney(Number(p.total), 0)} {currencyCode}
                 </Text>
               </View>

@@ -52,3 +52,7 @@ prompt
 server.log
 # Skills directory
 /skills/
+# APK artifacts — تُنشر عبر GitHub Releases لا عبر المستودع
+finacc-mobile/*.apk
+finacc-mobile/android/app/build/
+tool-results/

@@ -6,6 +6,7 @@ import type { SqlJsDatabase } from 'sql.js';
 import { getSetting } from '@/domain/settings';
 import { isOnboarded } from '@/domain/onboarding';
 import { getCurrentUserId } from '@/domain/session-user';
+import { bytesToBase64 as pureBytesToBase64, base64ToBytes as pureBase64ToBytes } from '@/utils/base64';
 
 /**
  * النسخ الاحتياطي والاستعادة المحلي 100% (الوحدة 11 — FR-11-01/02/04/05/06/08):
@@ -53,27 +54,14 @@ function stampLocal(d = new Date()): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
+// ترميز Base64 خالص — بلا btoa/atob (غير موجودين في Hermes) وبلا Buffer
+// (غير موجود في المتصفح) — نفس المخرجات على المنصات الثلاث (Task Android-Fix)
 function bytesToBase64(bytes: Uint8Array): string {
-  if (typeof btoa === 'function') {
-    let bin = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    }
-    return btoa(bin);
-  }
-  // بيئة بلا btoa (بعض runtimes الجهاز)
-  return Buffer.from(bytes).toString('base64');
+  return pureBytesToBase64(bytes);
 }
 
 function base64ToBytes(b64: string): Uint8Array {
-  if (typeof atob === 'function') {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-  return new Uint8Array(Buffer.from(b64, 'base64'));
+  return pureBase64ToBytes(b64);
 }
 
 /** تنزيل بايتات كملف في المتصفح (استدعاء مستخدم = إيماءة صالحة للتنزيل). */

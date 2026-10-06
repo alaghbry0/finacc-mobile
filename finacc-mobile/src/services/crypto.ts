@@ -1,11 +1,18 @@
 /**
- * تجزئة PIN — قرار بيئة موثق (worklog Task 0/1):
+ * تجزئة PIN (قرار بيئة موثق — worklog Task 0/1):
  * SRS FR-12-03 يحدد Argon2id (وحدة native تُضاف عند بناء EAS). في المعاينة والاختبارات
  * (bun/sql.js) نستخدم PBKDF2-SHA256 عبر WebCrypto القياسي بنفس الواجهة تماماً،
  * وعند الترحيل إلى EAS تُستبدل هذه الطبقة بـ Argon2id دون تغيير أي مستدعٍ.
  *
+ * الجهاز (Hermes) لا يوفر WebCrypto ولا TextEncoder (Task Android-Fix):
+ * المسار البديل PBKDF2 بتنفيذ JavaScript خالص (utils/sha256) — معياري حرفياً
+ * وينتج نفس مخرجات WebCrypto بتة ببتة (يؤكده الاختبار cross-check) فبصمة PIN
+ * تظل متوافقة بين منصة الويب والجهاز.
+ *
  * صيغة التخزين: pbkdf2$<iterations>$<saltHex(32)>$<hashHex(64)>
  */
+
+import { pbkdf2Sha256, utf8Bytes } from '@/utils/sha256';
 
 const PBKDF2_ITERATIONS = 100_000;
 const SALT_BYTES = 16; // 16 بايت → 32 حرف hex
@@ -38,23 +45,30 @@ function randomBytes(n: number): Uint8Array<ArrayBuffer> {
   return b;
 }
 
-function getSubtle(): SubtleCrypto {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    throw new Error('WebCrypto (crypto.subtle) غير متاح في هذه البيئة — تعذر حماية رمز PIN. أعد تشغيل التطبيق أو بلّغ الدعم');
+/** WebCrypto متاح فقط على الويب — الجهاز (Hermes) يستخدم المسار الخالص. */
+function getSubtle(): SubtleCrypto | null {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c && typeof c.subtle?.deriveBits === 'function' && typeof TextEncoder !== 'undefined') {
+    return c.subtle;
   }
-  return subtle;
+  return null;
 }
 
 async function derivePinHex(pin: string, saltHex: string, iterations: number): Promise<string> {
+  const dkLen = KEY_BITS / 8;
   const subtle = getSubtle();
-  const key = await subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
-  const bits = await subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt: hexToBytes(saltHex), iterations },
-    key,
-    KEY_BITS,
-  );
-  return bytesToHex(new Uint8Array(bits));
+  if (subtle !== null) {
+    const key = await subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+    const bits = await subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt: hexToBytes(saltHex), iterations },
+      key,
+      KEY_BITS,
+    );
+    return bytesToHex(new Uint8Array(bits));
+  }
+  // الجهاز: PBKDF2-HMAC-SHA256 خالص — نفس الناتج تماماً (RFC 8018)
+  const derived = pbkdf2Sha256(utf8Bytes(pin), hexToBytes(saltHex), iterations, dkLen);
+  return bytesToHex(derived);
 }
 
 /** تجزئة PIN لإدخالها في app_user.pin_hash. salt اختياري (عشوائي 16 بايت hex إن لم يُمرر — للإنتاج). */

@@ -1,5 +1,6 @@
 import * as SQLite from 'expo-sqlite';
 import type { DbEngine } from './types';
+import { base64ToBytes } from '@/utils/base64';
 
 /**
  * محرك expo-sqlite للأجهزة (native) — WAL + foreign_keys مفعّلان دائماً.
@@ -76,7 +77,8 @@ export async function createNativeEngine(): Promise<DbEngine> {
       const FileSystem = await import('expo-file-system/legacy');
       const src = `${FileSystem.documentDirectory}SQLite/finacc.db`;
       const b64 = await FileSystem.readAsStringAsync(src, { encoding: FileSystem.EncodingType.Base64 });
-      return Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+      // Hermes بلا atob — فك خالص (Task Android-Fix)
+      return base64ToBytes(b64);
     },
 
     /** إغلاق الاتصال — قبل استبدال ملف القاعدة عند الاستعادة (FR-11-02). */

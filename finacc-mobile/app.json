@@ -2,7 +2,7 @@
   "expo": {
     "name": "المحاسب الشخصي",
     "slug": "finacc-mobile",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "scheme": "finacc",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,6 +16,7 @@
     },
     "android": {
       "package": "ye.finacc.personal",
+      "versionCode": 2,
       "edgeToEdgeEnabled": true,
       "permissions": [
         "android.permission.CAMERA",
@@ -37,6 +38,7 @@
     },
     "plugins": [
       "expo-router",
+      "./plugins/force-rtl",
       [
         "expo-sqlite"
       ],

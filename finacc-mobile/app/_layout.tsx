@@ -1,10 +1,9 @@
-import { useEffect } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, I18nManager, Platform, StyleSheet, Text, View } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useFonts, Tajawal_400Regular, Tajawal_500Medium, Tajawal_700Bold } from '@expo-google-fonts/tajawal';
 import { IBMPlexSansArabic_600SemiBold } from '@expo-google-fonts/ibm-plex-sans-arabic';
-import { I18nManager } from 'react-native';
 import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { common } from '@/i18n/ar';
 import { colors, fontSizes, fonts, radii, spacing } from '@/theme';
@@ -18,6 +17,11 @@ try {
 } catch {
   // لا يؤثر على المعاينة — dir="rtl" يُحقن في <html> من سكربت البناء
 }
+
+// الجهاز فقط: forceRTL يحتاج إعادة تحميل الحزمة ليعمل (Task Android-Fix) —
+// الإعداد الأصلي مضمون من MainApplication (plugins/force-rtl) قبل قراءة RN،
+// وهذا البوابة شبكة أمان إن أُعيد توليد android/ يدوياً بلا الإضافة.
+const NEEDS_RTL_RELOAD = Platform.OS !== 'web' && !I18nManager.isRTL;
 
 /** شاشة الإقلاع — لا شاشة بيضاء أبدًا (DS-32). */
 function BootSplash() {
@@ -55,18 +59,40 @@ export default function RootLayout() {
   const startWatchers = useSessionStore((s) => s.startWatchers);
   const noteActivity = useSessionStore((s) => s.noteActivity);
 
-  // الإقلاع + مراقبات القفل التلقائي (مرة واحدة)
+  // إعادة تحميل مرة واحدة لتفعيل RTL إن كان الإقلاع الأول LTR (جهاز فقط)
+  const [rtlBlocked, setRtlBlocked] = useState(NEEDS_RTL_RELOAD);
   useEffect(() => {
+    if (!rtlBlocked) return;
+    let settled = false;
+    void (async () => {
+      try {
+        const { reloadAppAsync } = await import('expo');
+        await reloadAppAsync('force-rtl');
+        return; // إعادة التشغيل قادمة — هذه الجلسة تنتهي هنا
+      } catch {
+        /* فشل نادر — نتابع بهذه الجلسة LTR والإقلاع القادم سيكون RTL */
+      }
+      if (!settled) {
+        settled = true;
+        setRtlBlocked(false);
+      }
+    })();
+  }, [rtlBlocked]);
+
+  // الإقلاع + مراقبات القفل التلقائي (مرة واحدة) — بعد جاهزية الاتجاه فقط
+  useEffect(() => {
+    if (rtlBlocked) return;
     void boot();
     startWatchers();
-  }, [boot, startWatchers]);
+  }, [rtlBlocked, boot, startWatchers]);
 
-  // التوجيه حسب حالة الجلسة (Segment)
+  // التوجيه حسب حالة الجلسة (Segment) — لا توجيه قبل الإقلاع
   useEffect(() => {
+    if (rtlBlocked) return;
     if (status === 'onboarding') router.replace('/auth/onboarding');
     else if (status === 'locked') router.replace('/auth/login');
     else if (status === 'unlocked') router.replace('/');
-  }, [status]);
+  }, [rtlBlocked, status]);
 
   if (!fontsLoaded) return null;
 

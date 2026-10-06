@@ -7,14 +7,11 @@ import { getDb, setDbEngineForTesting } from '@/db/client';
 import { SCHEMA_VERSION } from '@/db/migrate';
 import { getCurrentUserId } from '@/domain/session-user';
 import { createBackup } from './backup';
+import { bytesToBase64 } from '@/utils/base64';
 
 function bytesToBase64Local(bytes: Uint8Array): string {
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
+  // Hermes بلا btoa — ترميز خالص (Task Android-Fix)
+  return bytesToBase64(bytes);
 }
 export async function restoreNative(bytes: Uint8Array): Promise<void> {
   const FileSystem = await import('expo-file-system/legacy');
@@ -62,7 +59,14 @@ export async function restoreNative(bytes: Uint8Array): Promise<void> {
   await FileSystem.moveAsync({ from: tmpPath, to: mainPath });
 
   // القاعدة القديمة في الذاكرة أُغلقت — أعد تهيئة الاتصال على الملف الجديد،
-  // والحالة المنطقية في الذاكرة قديمة لذا يلزم إعادة تشغيل التطبيق (يُخبر به المستخدم).
+  // والحالة المنطقية في الذاكرة قديمة لذا يُعاد تشغيل التطبيق تلقائياً
+  // (reloadAppAsync من expo — تعمل في بناء الإصدار أيضاً — Task Android-Fix).
   setDbEngineForTesting(null);
+  try {
+    const { reloadAppAsync } = await import('expo');
+    await reloadAppAsync('restore-backup');
+  } catch {
+    /* فشل إعادة التشغيل التلقائي نادر — الشاشة تخبر المستخدم بإعادة الفتح يدوياً */
+  }
 }
 
