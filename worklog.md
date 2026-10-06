@@ -150,3 +150,23 @@ Stage Summary:
 - البوابات: tsc صفر ✓ | bun test الكل أخضر (اختبار معادلة الرصيد بصفوف فواتير/سندات يدوية = AC-02 مبسط) ✓ | تصدير ✓ | متصفح: عميل «أحمد سعيد» برصيد افتتاحي 100,000 YER → مدين في القائمة والملف ✓ | سعر SAR أُدخل وحُفظ ✓ | شارة «لا سعر اليوم» تعمل ✓.
 - مؤجل موثق: كشف الحساب التفصيلي (FR-03-04 → موجة 5)، استيراد عملاء Excel (FR-03-08).
 - ملاحظة للموجة 4/5: معادلة الرصيد تستحقى من الجداول مباشرة — أي كتابة فاتورة/سند تلتزم بالمخطط تُحدّث الأرصدة تلقائياً بلا كود إضافي.
+
+---
+Task ID: 4-a + 4-b + 4-c (موجة الفوترة — الهدف الأول للمشروع)
+Agent: 3 وكلاء general-purpose (sonnet) + تدقيق وإصلاحات المنسق
+Task: شاشة البيع الكاشير + الشراء + المرتجعات المرتبطة + القوائم والتفاصيل — الدومين الذرّي الكامل
+
+Work Log:
+- src/domain/invoicing.ts (1320 سطراً): saveSaleInvoice داخل transaction واحدة (فحص مخزون برسالة تسمّي الصنف/الكمية الناقصة + snapshot سعر صرف + WAC line_cost + docseq INV + حركات مخزون سالبة + cash_tx receipt + payment_allocation + حد ائتمان warn/block) + convertDraftToCompleted (استهلاك الرقم عند التحويل + فحص الرصيد وقتها) + voidInvoice (حركات معاكسة كاملة + is_voided + reversal_of + رفض عند وجود مرتجعات) + getSaleInvoice/listInvoices/listBestSellers.
+- src/domain/purchasing.ts (896): حفظ شراء بتوزيع خصم الرأس pro-rata قبل تحديث WAC (قاعدة 5.4-3) + دفع payment/آجل/مختلط + voidPurchase + getPurchaseInvoice/listPurchaseInvoices.
+- src/domain/returns.ts (1018): createSaleReturn (بتكلفة line_cost الأصلية — لا WAC الجاري) + createPurchaseReturn (سعر Snapshot + إعادة حساب WAC للمتبقي) + returnableLines (المباع − المرتجع) + فحوصات AC-21 (كمية زائدة/فاتورة ملغاة).
+- src/store/cart.ts (519): سلة zustand كاملة (بنود/عميل/صندوق/عملة/مستودع) + Park (سلال معلقة) + مسودة throttled تُستعاد بعد الانهيار مع Banner.
+- شاشات البيع: 5 مكونات جاهزة (PaymentSheet DS-40 بالفئات السريعة و«المبلغ بالضبط» و«تحويل المتبقي آجلاً»، CustomerPickerSheet، ScanSaleSheet، ParkedCartsSheet، ExtrasSheet) + app/sales/new.tsx (§6.5 حرفياً: شريط أهداف Chips + بنود حية ب«المتاح: N» + QtyStepper + إجماليات ثابتة أسفل + 4 أزرار) + index.tsx قائمة بفلاتر + [id].tsx تفاصيل (شارة سعر تقديري + تكلفة/ربح + مرتجعات مرتبطة + إلغاء بكلمة تأكيد + تحويل مسودة) + return.tsx عبر ReturnFlow المشترك.
+- الشراء: new.tsx + index.tsx + [id].tsx + return.tsx.
+- الاختبارات: **211 pass** (آلة الحالات كاملة + 100 فاتورة متوازية + AC-02/03/21 + WAC + مرتجعات).
+
+Stage Summary:
+- **إصلاحات المنسق بعد موت الوكلاء عند المهلة**: (1) itemPicker لم يكن يغلق بعد إضافة صنف مسعَّر → backdrop خفي يحجب النقرات — صُحح addProduct ليغلق دائماً + شبكة أمان إجبارية لفك تركيب BottomSheet بعد 500ms. (2) router.push('/sales/index') كان يطابق مسار [id] — صُحح إلى '/sales'. (3) أخطاء tsc صغيرة (toFormat→formatMoney، SectionTitle+hint، استيراد مكرر، أنواع globals.d.ts).
+- **التحقق المتصفحي النهائي (المنسق)**: بيع نقدي 3×1,000 عبر PaymentSheet «المبلغ بالضبط» → **INV-2026-00001** حُفظت والمخزون 50→47 بعد مرتجع + رصيد العميل 1,000 بعد بيع آجل (INV-2026-00002) + **مسودة السلة استُعيدت بعد إعادة التحميل مع Banner** (AC-23) + مرتجع SRN-2026-00001 يظهر مرتبطاً بالأصل والمخزون عاد + القائمة بالفلاتر تعمل + Print-on-save=ask يظهر بعد الحفظ. صفر أخطاء متصفح.
+- ملاحظة للصقل: تفاصيل الفاتورة لا تعيد جلب «المرتجعات المرتبطة» تلقائياً بعد حفظ مرتجع (تظهر بعد إعادة تحميل) — تُصلح في موجة الصقل (useFocusEffect).
+- **الهدف الأول «فاتورة مبيعات تُحفظ» تحقق** — الطباعة الفعلية توصلها الموجة 6.

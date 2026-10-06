@@ -5,6 +5,8 @@ import { colors, fontSizes, fonts, spacing } from '@/theme';
 
 interface SectionTitleProps {
   title: string;
+  /** سطر توضيحي صغير تحت العنوان */
+  hint?: string;
   /** رابط إجراء جانبي مثل «عرض الكل» */
   actionLabel?: string;
   onAction?: () => void;
@@ -13,9 +15,10 @@ interface SectionTitleProps {
 }
 
 /** SectionTitle: عنوان مقطع صغير + إجراء جانبي اختياري (عرض الكل…). */
-export function SectionTitle({ title, actionLabel, onAction, icon, style }: SectionTitleProps) {
+export function SectionTitle({ title, hint, actionLabel, onAction, icon, style }: SectionTitleProps) {
   return (
-    <View style={[s.row, style]}>
+    <View style={[s.wrap, style]}>
+    <View style={s.row}>
       <View style={s.titleWrap}>
         {icon !== undefined ? icon : null}
         <Text style={s.title} numberOfLines={1}>
@@ -33,6 +36,12 @@ export function SectionTitle({ title, actionLabel, onAction, icon, style }: Sect
           <Text style={s.actionText}>{actionLabel}</Text>
         </Pressable>
       ) : null}
+    </View>
+    {hint !== undefined ? (
+      <Text style={s.hint} numberOfLines={2}>
+        {hint}
+      </Text>
+    ) : null}
     </View>
   );
 }
@@ -67,4 +76,14 @@ const s = StyleSheet.create({
     color: colors.accent,
   },
   pressed: { opacity: 0.85 },
+  wrap: {
+    marginBottom: spacing.sm,
+  },
+  hint: {
+    fontFamily: fonts.body,
+    fontSize: fontSizes.micro,
+    color: colors.textSecondary,
+    marginTop: -spacing.xs,
+    marginBottom: spacing.sm,
+  },
 });

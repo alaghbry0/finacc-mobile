@@ -17,9 +17,10 @@ import { installments } from './ar/installments';
 import { reports } from './ar/reports';
 import { settings } from './ar/settings';
 import { printing } from './ar/printing';
+import { invoices } from './ar/invoices';
 import { backup } from './ar/backup';
 
 export { fill };
-export { common, auth, tabs, inventory, parties, currency, sales, purchases, cash, cheques, installments, reports, settings, printing, backup };
+export { common, auth, tabs, inventory, parties, currency, sales, purchases, cash, cheques, installments, reports, settings, printing, backup, invoices };
 
-export const ar = { common, auth, tabs, inventory, parties, currency, sales, purchases, cash, cheques, installments, reports, settings, printing, backup };
+export const ar = { common, auth, tabs, inventory, parties, currency, sales, purchases, cash, cheques, installments, reports, settings, printing, backup, invoices };

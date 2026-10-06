@@ -13,6 +13,7 @@
     "@expo-google-fonts/ibm-plex-sans-arabic": "^0.4.2",
     "@expo-google-fonts/tajawal": "^0.4.1",
     "@expo/metro-runtime": "~6.1.2",
+    "@react-native-async-storage/async-storage": "2.2.0",
     "decimal.js": "^10.6.0",
     "drizzle-orm": "^0.45.3",
     "expo": "~54.0.37",

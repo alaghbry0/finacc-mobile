@@ -95,6 +95,15 @@ export function BottomSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  // شبكة أمان: إن فشل استدعاء setMounted(false) (finished=false لأي سبب)
+  // نفكك التركيب قسراً بعد مهلة — لا يبقى backdrop خفي يحجب الشاشة أبداً.
+  useEffect(() => {
+    if (visible || !mounted) return;
+    const t = setTimeout(() => setMounted(false), 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, mounted]);
+
   useEffect(() => {
     if (mounted && visible) animateIn();
     // eslint-disable-next-line react-hooks/exhaustive-deps
