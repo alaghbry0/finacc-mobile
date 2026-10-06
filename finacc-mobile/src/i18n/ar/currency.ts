@@ -33,4 +33,6 @@ export const currency = {
   baseNoDisable: 'العملة الأساسية لا يمكن تعطيلها',
 
   missingRatesBanner: 'عملات بلا سعر اليوم — أدخل سعرها قبل أي حركة بها',
+  baseTag: 'عملة الأساس',
+  pickHint: 'غير الأساس؟ يلزم سعر اليوم وقت الحفظ',
 } as const;

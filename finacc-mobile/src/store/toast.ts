@@ -5,11 +5,14 @@ export interface ToastOptions {
   undo?: { label?: string; run: () => void };
   /** مدة العرض بالمللي ثانية (الافتراضي 5000 وفق DS-37) */
   duration?: number;
+  /** نبرة الرسالة: تحذير كهرماني للتحذيرات غير الفادحة (قرار 9 — عجز الصندوق) */
+  tone?: 'neutral' | 'warning';
 }
 
 interface ToastState {
   visible: boolean;
   message: string;
+  tone: 'neutral' | 'warning';
   undo: { label: string; run: () => void } | null;
   /** إظهار snackbar سفلي — الرسالة الأخيرة تحل محل السابقة */
   show: (message: string, options?: ToastOptions) => void;
@@ -33,12 +36,14 @@ function clearTimer() {
 export const useToastStore = create<ToastState>((set, get) => ({
   visible: false,
   message: '',
+  tone: 'neutral',
   undo: null,
   show: (message, options) => {
     clearTimer();
     set({
       visible: true,
       message,
+      tone: options?.tone ?? 'neutral',
       undo: options?.undo
         ? { label: options.undo.label ?? 'تراجع', run: options.undo.run }
         : null,

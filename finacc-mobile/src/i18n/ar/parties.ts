@@ -81,7 +81,35 @@ export const parties = {
   edit: 'تعديل',
   createdAt: 'أُضيف في',
 
-  // كشف الحساب (FR-03-04 — شاشته في الموجة 5)
+  // كشف الحساب (FR-03-04 — الموجة 5-b)
   statementSoonTitle: 'كشف الحساب',
   statementSoonMessage: 'كشف الحساب التفصيلي متاح بعد أول فاتورة — الموجة القادمة.',
+  statementAction: 'كشف الحساب',
+
+  // شاشة كشف الحساب
+  statementTitle: 'كشف حساب {name}',
+  statementCurrencyLabel: 'عملة الكشف',
+  statementFromLabel: 'من تاريخ',
+  statementToLabel: 'إلى تاريخ',
+  statementOpening: 'الرصيد الافتتاحي',
+  statementClosing: 'الرصيد الختامي',
+  statementColDate: 'التاريخ',
+  statementColDoc: 'المستند',
+  statementColDebit: 'مدين',
+  statementColCredit: 'دائن',
+  statementColBalance: 'الرصيد',
+  statementEmptyTitle: 'لا أحداث بهذه العملة',
+  statementEmptyMessage: 'ليس لهذا الطرف حركات بعملة الكشف المختارة خلال الفترة — جرّب عملة أخرى.',
+  statementOtherCurrencies: 'توجد أحداث لهذا الطرف بعملات أخرى غير معروضة هنا — لكل عملة كشفها المستقل.',
+  statementExportPdf: 'تصدير PDF',
+  statementExportSoon: 'تصدير PDF متاح في الموجة القادمة (6) — نسخة النص كاملة على الشاشة الآن.',
+  statementApply: 'تطبيق الفترة',
+  statementClearPeriod: 'كامل الفترة',
+  docSale: 'فاتورة بيع',
+  docSaleReturn: 'مرتجع بيع',
+  docReceipt: 'سند قبض',
+  docCheque: 'شيك محصّل',
+  docPurchase: 'فاتورة شراء',
+  docPurchaseReturn: 'مرتجع شراء',
+  docPayment: 'سند صرف',
 } as const;

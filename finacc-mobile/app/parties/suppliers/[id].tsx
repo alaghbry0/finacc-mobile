@@ -1,8 +1,10 @@
 import { useCallback, useRef, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
-import { EmptyState, Screen } from '@/components';
+import { EmptyState, Screen, SecondaryButton } from '@/components';
 import { PartyProfile } from '@/components/party/PartyProfile';
 import { common, parties as partiesAr } from '@/i18n/ar';
+import { spacing } from '@/theme';
 
 /** ملف المورّد — نفس بنية العميل (FR-03-03) بلا حد ائتمان. */
 export default function SupplierProfileScreen() {
@@ -38,6 +40,18 @@ export default function SupplierProfileScreen() {
         onEdit={() => router.push(`/parties/suppliers/${id}/edit`)}
         onArchived={() => router.back()}
       />
+      <View style={s.actionsRow}>
+        <SecondaryButton
+          label={partiesAr.statementAction}
+          onPress={() => router.push(`/parties/suppliers/${id}/statement`)}
+        />
+      </View>
     </Screen>
   );
 }
+
+const s = StyleSheet.create({
+  actionsRow: {
+    marginTop: spacing.md,
+  },
+});

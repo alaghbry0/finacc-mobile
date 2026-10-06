@@ -26,7 +26,8 @@ import { AmountPadField } from '@/screens/inventory/AmountPadSheet';
 import { CustomerPickerSheet } from '@/screens/sales/CustomerPickerSheet';
 import { DailyRateSheet } from '@/screens/invoices/DailyRateSheet';
 import { VoidInvoiceSheet } from '@/screens/invoices/VoidInvoiceSheet';
-import { common, invoices as t, purchases as p, sales as st } from '@/i18n/ar';
+import { PlanFormSheet } from '@/screens/installments/PlanFormSheet';
+import { common, invoices as t, installments as inst, purchases as p, sales as st } from '@/i18n/ar';
 import {
   CreditLimitConfirmationRequiredError,
   getSaleInvoice,
@@ -65,6 +66,7 @@ export default function SaleInvoiceDetailScreen() {
   const [voidOpen, setVoidOpen] = useState(false);
   const [voidBusy, setVoidBusy] = useState(false);
   const [convertOpen, setConvertOpen] = useState(false);
+  const [planOpen, setPlanOpen] = useState(false);
 
   // حالة التحويل (مسودة → مكتملة)
   const [payType, setPayType] = useState<'cash' | 'credit' | 'mixed'>('cash');
@@ -246,6 +248,12 @@ export default function SaleInvoiceDetailScreen() {
         <View style={s.footerWrap}>
           {isDraft && !isReturnDoc ? (
             <PrimaryButton label={t.convertAction} onPress={() => setConvertOpen(true)} />
+          ) : null}
+          {!isVoid && !isDraft && !isReturnDoc && inv.docType === 'sale' && inv.payStatus === 'credit' && dec(inv.dueAmount).greaterThan(0) ? (
+            <SecondaryButton
+              label={inst.planButton}
+              onPress={() => setPlanOpen(true)}
+            />
           ) : null}
           {!isVoid && !isDraft && !isReturnDoc ? (
             <SecondaryButton
@@ -518,6 +526,21 @@ export default function SaleInvoiceDetailScreen() {
           const retry = retryRef.current;
           retryRef.current = null;
           if (retry !== null) void retry();
+        }}
+      />
+
+      {/* تقسيط الفاتورة الآجلة (FR-05-01) */}
+      <PlanFormSheet
+        visible={planOpen}
+        onClose={() => setPlanOpen(false)}
+        invoiceId={invoiceId}
+        currencyId={inv.currencyId}
+        currencyCode={code}
+        currencyDecimals={decimals}
+        invoiceNo={inv.invoiceNo}
+        onCreated={() => {
+          setPlanOpen(false);
+          void load();
         }}
       />
 

@@ -16,6 +16,7 @@ const WEB = Platform.OS === 'web';
 export function FeedbackBar() {
   const visible = useToastStore((s) => s.visible);
   const message = useToastStore((s) => s.message);
+  const tone = useToastStore((s) => s.tone);
   const undo = useToastStore((s) => s.undo);
   const dismiss = useToastStore((s) => s.dismiss);
   const runUndo = useToastStore((s) => s.runUndo);
@@ -50,7 +51,7 @@ export function FeedbackBar() {
         },
       ]}
     >
-      <View style={styles.bar}>
+      <View style={[styles.bar, tone === 'warning' && styles.barWarning]}>
         <Text style={styles.message} numberOfLines={3}>
           {message}
         </Text>
@@ -107,6 +108,11 @@ const styles = StyleSheet.create({
     elevation: 6,
     maxWidth: 640,
     width: '100%',
+  },
+  /** نبرة تحذير كهرمانية (قرار 9 — عجز الصندوق: تحذير لا خطأ) — حد بادئ يمين RTL */
+  barWarning: {
+    borderColor: 'rgba(251, 191, 36, 0.55)',
+    borderRightWidth: 4,
   },
   message: {
     flex: 1,
